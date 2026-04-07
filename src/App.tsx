@@ -11,6 +11,9 @@ import {
   CheckCircle2, 
   ChevronDown, 
   ChevronUp, 
+  ChevronLeft,
+  ChevronRight,
+  Scissors,
   Copy, 
   Download, 
   FileText, 
@@ -25,7 +28,8 @@ import {
   AlertCircle,
   Upload,
   Languages,
-  FileUp
+  FileUp,
+  Video
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import ReactMarkdown from "react-markdown";
@@ -50,11 +54,12 @@ const translations = {
     placeholderLessonTitle: "e.g., Introduction to Quantum Mechanics",
     labelContent: "Content / Transcript",
     placeholderContent: "Paste your content here or upload a file...",
-    btnUpload: "Upload File (.txt, .srt, .mp3, .wav)",
+    btnUpload: "Upload File (.txt, .srt, .mp3, .wav, .mp4)",
     btnGenerate: "Generate Study Material",
-    btnGenerating: "Analyzing Content (this may take a moment for audio)...",
-    errorEmpty: "Please provide a title and some content (text or audio).",
-    errorFailed: "Failed to generate learning material. Please try again.",
+    btnGenerating: "Analyzing Content (this may take a moment for media)...",
+    errorEmpty: "Please provide a title and some content (text, audio, or video).",
+    errorFileSize: "File is too large. Please upload a file smaller than 15MB.",
+    errorFailed: "Failed to generate learning material. The file might be too large or complex. Please try a shorter clip or text.",
     badgeGenerated: "Generated Material",
     titleSections: "Key Sections",
     titleConcepts: "Core Concepts",
@@ -86,7 +91,11 @@ const translations = {
     importanceLow: "low",
     clickToFlip: "Click to flip",
     exampleLabel: "Example",
-    personalizedStrategy: "Personalized for this content"
+    personalizedStrategy: "Personalized for this content",
+    labelParts: "Content Parts",
+    partIndicator: "Part {current} of {total}",
+    btnSplit: "Split Large File",
+    splitSuccess: "File split into {count} parts. You can process them one by one."
   },
   vi: {
     appName: "Trợ lý Học tập AI",
@@ -97,11 +106,12 @@ const translations = {
     placeholderLessonTitle: "VD: Nhập môn Cơ học Lượng tử",
     labelContent: "Nội dung / Bản ghi",
     placeholderContent: "Dán nội dung vào đây hoặc tải lên tệp...",
-    btnUpload: "Tải tệp lên (.txt, .srt, .mp3, .wav)",
+    btnUpload: "Tải tệp lên (.txt, .srt, .mp3, .wav, .mp4)",
     btnGenerate: "Tạo tài liệu học tập",
-    btnGenerating: "Đang phân tích nội dung (có thể mất chút thời gian cho âm thanh)...",
-    errorEmpty: "Vui lòng cung cấp tiêu đề và nội dung (văn bản hoặc âm thanh).",
-    errorFailed: "Không thể tạo tài liệu học tập. Vui lòng thử lại.",
+    btnGenerating: "Đang phân tích nội dung (có thể mất chút thời gian cho đa phương tiện)...",
+    errorEmpty: "Vui lòng cung cấp tiêu đề và nội dung (văn bản, âm thanh hoặc video).",
+    errorFileSize: "Tệp quá lớn. Vui lòng tải lên tệp nhỏ hơn 15MB.",
+    errorFailed: "Không thể tạo tài liệu học tập. Tệp có thể quá lớn hoặc phức tạp. Vui lòng thử một đoạn ngắn hơn hoặc văn bản.",
     badgeGenerated: "Tài liệu đã tạo",
     titleSections: "Các phần chính",
     titleConcepts: "Khái niệm cốt lõi",
@@ -133,7 +143,11 @@ const translations = {
     importanceLow: "thấp",
     clickToFlip: "Nhấn để lật",
     exampleLabel: "Ví dụ",
-    personalizedStrategy: "Được cá nhân hóa cho nội dung này"
+    personalizedStrategy: "Được cá nhân hóa cho nội dung này",
+    labelParts: "Các phần nội dung",
+    partIndicator: "Phần {current} trên {total}",
+    btnSplit: "Cắt tệp lớn",
+    splitSuccess: "Tệp đã được cắt thành {count} phần. Bạn có thể xử lý từng phần một."
   }
 };
 
@@ -355,7 +369,9 @@ export default function App() {
   const [lang, setLang] = useState<Language>("en");
   const [lessonTitle, setLessonTitle] = useState("");
   const [content, setContent] = useState("");
-  const [audioData, setAudioData] = useState<{ data: string; mimeType: string } | null>(null);
+  const [mediaData, setMediaData] = useState<{ data: string; mimeType: string; type: 'audio' | 'video' } | null>(null);
+  const [contentChunks, setContentChunks] = useState<({ text: string } | { data: string; mimeType: string; type: 'audio' | 'video' })[]>([]);
+  const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [material, setMaterial] = useState<LearningMaterial | null>(null);
   const [topics, setTopics] = useState<Topic[]>([]);
@@ -428,24 +444,54 @@ export default function App() {
     localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
   };
 
+  const splitFile = () => {
+    if (content.trim()) {
+      const chunks: ({ text: string } | { data: string; mimeType: string; type: 'audio' | 'video' })[] = [];
+      const chunkSize = 20000;
+      for (let i = 0; i < content.length; i += chunkSize) {
+        chunks.push({ text: content.substring(i, i + chunkSize) });
+      }
+      setContentChunks(chunks);
+      setCurrentChunkIndex(0);
+      const firstChunk = chunks[0];
+      if ('text' in firstChunk) setContent(firstChunk.text);
+      setError(null);
+    }
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     const isAudio = file.type.startsWith("audio/");
+    const isVideo = file.type.startsWith("video/");
+
+    // 15MB limit ONLY for video files
+    const MAX_VIDEO_SIZE = 15 * 1024 * 1024;
+    if (isVideo && file.size > MAX_VIDEO_SIZE) {
+      setError(t.errorFileSize);
+      return;
+    }
+
     const reader = new FileReader();
 
     reader.onload = (event) => {
       const result = event.target?.result;
       if (typeof result !== "string") return;
 
-      if (isAudio) {
+      if (isAudio || isVideo) {
         const base64 = result.split(",")[1];
-        setAudioData({ data: base64, mimeType: file.type });
-        setContent(""); // Clear text content if audio is uploaded
+        setMediaData({ 
+          data: base64, 
+          mimeType: file.type, 
+          type: isAudio ? 'audio' : 'video' 
+        });
+        setContent(""); // Clear text content if media is uploaded
+        setError(null);
       } else {
         setContent(result);
-        setAudioData(null); // Clear audio if text is uploaded
+        setMediaData(null); // Clear media if text is uploaded
+        setError(null);
       }
 
       if (!lessonTitle) {
@@ -453,7 +499,7 @@ export default function App() {
       }
     };
 
-    if (isAudio) {
+    if (isAudio || isVideo) {
       reader.readAsDataURL(file);
     } else {
       reader.readAsText(file);
@@ -461,7 +507,7 @@ export default function App() {
   };
 
   const generateMaterial = async () => {
-    if (!lessonTitle.trim() || (!content.trim() && !audioData)) {
+    if (!lessonTitle.trim() || (!content.trim() && !mediaData)) {
       setError(t.errorEmpty);
       return;
     }
@@ -473,31 +519,33 @@ export default function App() {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const model = "gemini-3-flash-preview";
       
-      const parts: any[] = [
-        { text: `Analyze the following content for the lesson titled "${lessonTitle}" and transform it into structured learning material. 
-        The output MUST be in ${lang === "en" ? "English" : "Vietnamese"}.
-        
-        IMPORTANT: 
-        - Generate AT LEAST 10 flashcards (thẻ ghi nhớ).
-        - Generate AT LEAST 10 quiz questions (câu hỏi trắc nghiệm).` }
-      ];
+      const parts: any[] = [];
 
-      if (audioData) {
+      if (mediaData) {
         parts.push({
           inlineData: {
-            data: audioData.data,
-            mimeType: audioData.mimeType
+            data: mediaData.data,
+            mimeType: mediaData.mimeType
           }
         });
       } else {
         parts.push({ text: `Content:\n"""\n${content}\n"""` });
       }
 
+      parts.push({ 
+        text: `Analyze the provided content for the lesson titled "${lessonTitle}" and transform it into structured learning material. 
+        The output MUST be in ${lang === "en" ? "English" : "Vietnamese"}.
+        
+        IMPORTANT: 
+        - Generate AT LEAST 10 flashcards (thẻ ghi nhớ).
+        - Generate AT LEAST 10 quiz questions (câu hỏi trắc nghiệm).` 
+      });
+
       const response = await ai.models.generateContent({
         model,
-        contents: { parts },
+        contents: [{ role: "user", parts }],
         config: {
-          systemInstruction: `You are an expert AI Learning Assistant. Your goal is to transform raw text, transcripts, or audio files into highly effective, structured learning materials that facilitate long-term memory and understanding. Ignore noise and repetitions. Be clear, concise, and insightful. Respond in ${lang === "en" ? "English" : "Vietnamese"}. ALWAYS generate at least 10 flashcards and 10 quiz questions for any content provided.`,
+          systemInstruction: `You are an expert AI Learning Assistant. Your goal is to transform raw text, transcripts, audio files, or video files into highly effective, structured learning materials that facilitate long-term memory and understanding. Ignore noise and repetitions. Be clear, concise, and insightful. Respond in ${lang === "en" ? "English" : "Vietnamese"}. ALWAYS generate at least 10 flashcards and 10 quiz questions for any content provided.`,
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -559,7 +607,17 @@ export default function App() {
         }
       });
  
-      const data = JSON.parse(response.text);
+      if (!response.text) {
+        throw new Error("Empty response from AI");
+      }
+
+      let data;
+      try {
+        data = JSON.parse(response.text);
+      } catch (e) {
+        console.error("Failed to parse JSON:", response.text);
+        throw new Error("Invalid JSON response from AI");
+      }
       const materialWithMeta: LearningMaterial = {
         ...data,
         id: crypto.randomUUID(),
@@ -763,7 +821,17 @@ export default function App() {
                   </div>
                   <div>
                     <div className="flex justify-between items-center mb-2">
-                      <label className="block text-sm font-bold text-slate-700 uppercase tracking-wider">{t.labelContent}</label>
+                      <div className="flex items-center gap-3">
+                        <label className="block text-sm font-bold text-slate-700 uppercase tracking-wider">{t.labelContent}</label>
+                        {content.length > 25000 && contentChunks.length === 0 && (
+                          <button 
+                            onClick={splitFile}
+                            className="text-[10px] font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 bg-indigo-50 px-2 py-0.5 rounded-full transition-all"
+                          >
+                            <Scissors className="w-3 h-3" /> {t.btnSplit}
+                          </button>
+                        )}
+                      </div>
                       <button 
                         onClick={() => fileInputRef.current?.click()}
                         className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1.5 transition-colors"
@@ -775,16 +843,16 @@ export default function App() {
                         type="file" 
                         ref={fileInputRef} 
                         onChange={handleFileUpload} 
-                        accept=".txt,.srt,.mp3,.wav,.m4a" 
+                        accept=".txt,.srt,.mp3,.wav,.m4a,.mp4,.webm" 
                         className="hidden" 
                       />
                     </div>
-                    {audioData && (
+                    {mediaData && (
                       <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-xl flex items-center gap-3 text-indigo-700 mb-4">
-                        <RefreshCcw className="w-5 h-5 animate-pulse" />
-                        <p className="text-sm font-medium">Audio file ready for analysis</p>
+                        {mediaData.type === 'audio' ? <RefreshCcw className="w-5 h-5 animate-pulse" /> : <Video className="w-5 h-5 animate-pulse" />}
+                        <p className="text-sm font-medium">{mediaData.type === 'audio' ? 'Audio' : 'Video'} file ready for analysis</p>
                         <button 
-                          onClick={() => setAudioData(null)}
+                          onClick={() => setMediaData(null)}
                           className="ml-auto text-xs font-bold text-indigo-400 hover:text-indigo-600"
                         >
                           Remove
@@ -795,12 +863,57 @@ export default function App() {
                       value={content}
                       onChange={(e) => {
                         setContent(e.target.value);
-                        if (e.target.value.trim()) setAudioData(null);
+                        if (e.target.value.trim()) {
+                          setMediaData(null);
+                          setContentChunks([]);
+                        }
                       }}
                       placeholder={t.placeholderContent}
                       rows={8}
                       className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all resize-none"
                     />
+                    {contentChunks.length > 1 && (
+                      <div className="mt-4 flex items-center justify-between p-3 bg-slate-100/50 border border-slate-200 rounded-xl">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                          <div className="w-2 h-2 bg-indigo-500 rounded-full animate-pulse" />
+                          {t.partIndicator.replace("{current}", (currentChunkIndex + 1).toString()).replace("{total}", contentChunks.length.toString())}
+                        </span>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => {
+                              const next = Math.max(0, currentChunkIndex - 1);
+                              setCurrentChunkIndex(next);
+                              const chunk = contentChunks[next];
+                              if ('text' in chunk) setContent(chunk.text);
+                              else {
+                                setMediaData(chunk);
+                                setContent("");
+                              }
+                            }}
+                            disabled={currentChunkIndex === 0}
+                            className="p-1.5 bg-white shadow-sm border border-slate-200 rounded-lg disabled:opacity-30 hover:bg-slate-50 transition-all"
+                          >
+                            <ChevronLeft className="w-4 h-4 text-slate-600" />
+                          </button>
+                          <button 
+                            onClick={() => {
+                              const next = Math.min(contentChunks.length - 1, currentChunkIndex + 1);
+                              setCurrentChunkIndex(next);
+                              const chunk = contentChunks[next];
+                              if ('text' in chunk) setContent(chunk.text);
+                              else {
+                                setMediaData(chunk);
+                                setContent("");
+                              }
+                            }}
+                            disabled={currentChunkIndex === contentChunks.length - 1}
+                            className="p-1.5 bg-white shadow-sm border border-slate-200 rounded-lg disabled:opacity-30 hover:bg-slate-50 transition-all"
+                          >
+                            <ChevronRight className="w-4 h-4 text-slate-600" />
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   
                   {error && (
