@@ -50,10 +50,10 @@ const translations = {
     placeholderLessonTitle: "e.g., Introduction to Quantum Mechanics",
     labelContent: "Content / Transcript",
     placeholderContent: "Paste your content here or upload a file...",
-    btnUpload: "Upload File (.txt, .srt)",
+    btnUpload: "Upload File (.txt, .srt, .mp3, .wav)",
     btnGenerate: "Generate Study Material",
-    btnGenerating: "Analyzing Content...",
-    errorEmpty: "Please provide both a title and some content.",
+    btnGenerating: "Analyzing Content (this may take a moment for audio)...",
+    errorEmpty: "Please provide a title and some content (text or audio).",
     errorFailed: "Failed to generate learning material. Please try again.",
     badgeGenerated: "Generated Material",
     titleSections: "Key Sections",
@@ -72,7 +72,14 @@ const translations = {
     btnCopy: "Copy JSON",
     btnNew: "Start New Lesson",
     btnHistory: "History",
-    historyEmpty: "No history yet. Generate your first lesson!",
+    labelTopic: "Topic / Subject",
+    placeholderTopic: "e.g., Physics, History, Programming...",
+    btnCreateTopic: "Create New Topic",
+    btnSelectTopic: "Select Topic",
+    noTopicSelected: "Please select or create a topic first.",
+    historyEmpty: "No history yet. Create a topic and generate your first lesson!",
+    topicTitle: "Topic: {name}",
+    lessonCount: "{count} lessons",
     footerDesc: "Powered by Gemini AI. Designed for long-term retention.",
     importanceHigh: "high",
     importanceMedium: "medium",
@@ -90,10 +97,10 @@ const translations = {
     placeholderLessonTitle: "VD: Nhập môn Cơ học Lượng tử",
     labelContent: "Nội dung / Bản ghi",
     placeholderContent: "Dán nội dung vào đây hoặc tải lên tệp...",
-    btnUpload: "Tải tệp lên (.txt, .srt)",
+    btnUpload: "Tải tệp lên (.txt, .srt, .mp3, .wav)",
     btnGenerate: "Tạo tài liệu học tập",
-    btnGenerating: "Đang phân tích nội dung...",
-    errorEmpty: "Vui lòng cung cấp cả tiêu đề và nội dung.",
+    btnGenerating: "Đang phân tích nội dung (có thể mất chút thời gian cho âm thanh)...",
+    errorEmpty: "Vui lòng cung cấp tiêu đề và nội dung (văn bản hoặc âm thanh).",
     errorFailed: "Không thể tạo tài liệu học tập. Vui lòng thử lại.",
     badgeGenerated: "Tài liệu đã tạo",
     titleSections: "Các phần chính",
@@ -112,7 +119,14 @@ const translations = {
     btnCopy: "Sao chép JSON",
     btnNew: "Bắt đầu bài học mới",
     btnHistory: "Lịch sử",
-    historyEmpty: "Chưa có lịch sử. Hãy tạo bài học đầu tiên của bạn!",
+    labelTopic: "Chủ đề / Môn học",
+    placeholderTopic: "VD: Vật lý, Lịch sử, Lập trình...",
+    btnCreateTopic: "Tạo chủ đề mới",
+    btnSelectTopic: "Chọn chủ đề",
+    noTopicSelected: "Vui lòng chọn hoặc tạo chủ đề trước.",
+    historyEmpty: "Chưa có lịch sử. Hãy tạo chủ đề và bài học đầu tiên của bạn!",
+    topicTitle: "Chủ đề: {name}",
+    lessonCount: "{count} bài học",
     footerDesc: "Được hỗ trợ bởi Gemini AI. Thiết kế để ghi nhớ lâu dài.",
     importanceHigh: "cao",
     importanceMedium: "trung bình",
@@ -148,6 +162,8 @@ interface QuizItem {
 }
 
 interface LearningMaterial {
+  id: string;
+  topicId: string;
   title: string;
   summary: string;
   sections: Section[];
@@ -156,6 +172,13 @@ interface LearningMaterial {
   flashcards: Flashcard[];
   quiz: QuizItem[];
   review_strategy: string;
+  timestamp: number;
+}
+
+interface Topic {
+  id: string;
+  name: string;
+  lessons: LearningMaterial[];
 }
 
 // --- Components ---
@@ -332,9 +355,12 @@ export default function App() {
   const [lang, setLang] = useState<Language>("en");
   const [lessonTitle, setLessonTitle] = useState("");
   const [content, setContent] = useState("");
+  const [audioData, setAudioData] = useState<{ data: string; mimeType: string } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [material, setMaterial] = useState<LearningMaterial | null>(null);
-  const [history, setHistory] = useState<LearningMaterial[]>([]);
+  const [topics, setTopics] = useState<Topic[]>([]);
+  const [activeTopicId, setActiveTopicId] = useState<string | null>(null);
+  const [newTopicName, setNewTopicName] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
@@ -344,10 +370,14 @@ export default function App() {
 
   // Load history from localStorage
   useEffect(() => {
-    const savedHistory = localStorage.getItem("learning_history");
-    if (savedHistory) {
+    const savedTopics = localStorage.getItem("learning_topics");
+    if (savedTopics) {
       try {
-        setHistory(JSON.parse(savedHistory));
+        const parsed = JSON.parse(savedTopics);
+        setTopics(parsed);
+        if (parsed.length > 0) {
+          setActiveTopicId(parsed[0].id);
+        }
       } catch (e) {
         console.error("Failed to parse history", e);
       }
@@ -356,28 +386,82 @@ export default function App() {
 
   // Save history to localStorage
   const saveToHistory = (newMaterial: LearningMaterial) => {
-    const updatedHistory = [newMaterial, ...history.filter(m => m.title !== newMaterial.title)].slice(0, 10);
-    setHistory(updatedHistory);
-    localStorage.setItem("learning_history", JSON.stringify(updatedHistory));
+    if (!activeTopicId) return;
+
+    const updatedTopics = topics.map(topic => {
+      if (topic.id === activeTopicId) {
+        // Add new lesson, avoid duplicates by title within the same topic
+        const filteredLessons = topic.lessons.filter(l => l.title !== newMaterial.title);
+        return {
+          ...topic,
+          lessons: [newMaterial, ...filteredLessons].slice(0, 20)
+        };
+      }
+      return topic;
+    });
+
+    setTopics(updatedTopics);
+    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+  };
+
+  const createTopic = () => {
+    if (!newTopicName.trim()) return;
+    const newTopic: Topic = {
+      id: crypto.randomUUID(),
+      name: newTopicName.trim(),
+      lessons: []
+    };
+    const updatedTopics = [newTopic, ...topics];
+    setTopics(updatedTopics);
+    setActiveTopicId(newTopic.id);
+    setNewTopicName("");
+    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+  };
+
+  const deleteTopic = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const updatedTopics = topics.filter(t => t.id !== id);
+    setTopics(updatedTopics);
+    if (activeTopicId === id) {
+      setActiveTopicId(updatedTopics.length > 0 ? updatedTopics[0].id : null);
+    }
+    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const isAudio = file.type.startsWith("audio/");
     const reader = new FileReader();
+
     reader.onload = (event) => {
-      const text = event.target?.result as string;
-      setContent(text);
+      const result = event.target?.result;
+      if (typeof result !== "string") return;
+
+      if (isAudio) {
+        const base64 = result.split(",")[1];
+        setAudioData({ data: base64, mimeType: file.type });
+        setContent(""); // Clear text content if audio is uploaded
+      } else {
+        setContent(result);
+        setAudioData(null); // Clear audio if text is uploaded
+      }
+
       if (!lessonTitle) {
         setLessonTitle(file.name.replace(/\.[^/.]+$/, ""));
       }
     };
-    reader.readAsText(file);
+
+    if (isAudio) {
+      reader.readAsDataURL(file);
+    } else {
+      reader.readAsText(file);
+    }
   };
 
   const generateMaterial = async () => {
-    if (!lessonTitle.trim() || !content.trim()) {
+    if (!lessonTitle.trim() || (!content.trim() && !audioData)) {
       setError(t.errorEmpty);
       return;
     }
@@ -389,17 +473,31 @@ export default function App() {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const model = "gemini-3-flash-preview";
       
-      const response = await ai.models.generateContent({
-        model,
-        contents: `Analyze the following content for the lesson titled "${lessonTitle}" and transform it into structured learning material. 
+      const parts: any[] = [
+        { text: `Analyze the following content for the lesson titled "${lessonTitle}" and transform it into structured learning material. 
         The output MUST be in ${lang === "en" ? "English" : "Vietnamese"}.
         
-        Content:
-        """
-        ${content}
-        """`,
+        IMPORTANT: 
+        - Generate AT LEAST 10 flashcards (thẻ ghi nhớ).
+        - Generate AT LEAST 10 quiz questions (câu hỏi trắc nghiệm).` }
+      ];
+
+      if (audioData) {
+        parts.push({
+          inlineData: {
+            data: audioData.data,
+            mimeType: audioData.mimeType
+          }
+        });
+      } else {
+        parts.push({ text: `Content:\n"""\n${content}\n"""` });
+      }
+
+      const response = await ai.models.generateContent({
+        model,
+        contents: { parts },
         config: {
-          systemInstruction: `You are an expert AI Learning Assistant. Your goal is to transform raw text or transcripts into highly effective, structured learning materials that facilitate long-term memory and understanding. Ignore noise and repetitions. Be clear, concise, and insightful. Respond in ${lang === "en" ? "English" : "Vietnamese"}.`,
+          systemInstruction: `You are an expert AI Learning Assistant. Your goal is to transform raw text, transcripts, or audio files into highly effective, structured learning materials that facilitate long-term memory and understanding. Ignore noise and repetitions. Be clear, concise, and insightful. Respond in ${lang === "en" ? "English" : "Vietnamese"}. ALWAYS generate at least 10 flashcards and 10 quiz questions for any content provided.`,
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -460,10 +558,16 @@ export default function App() {
           }
         }
       });
-
+ 
       const data = JSON.parse(response.text);
-      setMaterial(data);
-      saveToHistory(data);
+      const materialWithMeta: LearningMaterial = {
+        ...data,
+        id: crypto.randomUUID(),
+        topicId: activeTopicId!,
+        timestamp: Date.now()
+      };
+      setMaterial(materialWithMeta);
+      saveToHistory(materialWithMeta);
       
       // Scroll to results
       setTimeout(() => {
@@ -531,23 +635,48 @@ export default function App() {
                   </h3>
                   <button onClick={() => setShowHistory(false)} className="text-xs font-bold text-slate-400 hover:text-slate-600">Close</button>
                 </div>
-                {history.length === 0 ? (
+                {topics.length === 0 ? (
                   <p className="text-sm text-slate-500 italic">{t.historyEmpty}</p>
                 ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {history.map((item, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => {
-                          setMaterial(item);
-                          setShowHistory(false);
-                          setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
-                        }}
-                        className="p-3 bg-white rounded-xl border border-slate-200 text-left hover:border-indigo-300 hover:shadow-sm transition-all group"
-                      >
-                        <h4 className="text-sm font-bold text-slate-900 truncate group-hover:text-indigo-600">{item.title}</h4>
-                        <p className="text-[10px] text-slate-400 mt-1 truncate">{item.summary}</p>
-                      </button>
+                  <div className="space-y-6">
+                    {topics.map((topic) => (
+                      <div key={topic.id} className="space-y-3">
+                        <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                          <h4 className="font-bold text-indigo-600 flex items-center gap-2">
+                            <BookOpen className="w-4 h-4" />
+                            {topic.name}
+                            <span className="text-[10px] font-normal text-slate-400 bg-slate-200/50 px-2 py-0.5 rounded-full">
+                              {t.lessonCount.replace("{count}", topic.lessons.length.toString())}
+                            </span>
+                          </h4>
+                          <button 
+                            onClick={(e) => deleteTopic(topic.id, e)}
+                            className="text-[10px] font-bold text-rose-400 hover:text-rose-600 uppercase tracking-widest"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                          {topic.lessons.map((item) => (
+                            <button
+                              key={item.id}
+                              onClick={() => {
+                                setMaterial(item);
+                                setActiveTopicId(topic.id);
+                                setShowHistory(false);
+                                setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+                              }}
+                              className="p-3 bg-white rounded-xl border border-slate-200 text-left hover:border-indigo-300 hover:shadow-sm transition-all group"
+                            >
+                              <h4 className="text-sm font-bold text-slate-900 truncate group-hover:text-indigo-600">{item.title}</h4>
+                              <p className="text-[10px] text-slate-400 mt-1 truncate">{item.summary}</p>
+                            </button>
+                          ))}
+                          {topic.lessons.length === 0 && (
+                            <p className="text-xs text-slate-400 italic col-span-full">No lessons in this topic yet.</p>
+                          )}
+                        </div>
+                      </div>
                     ))}
                   </div>
                 )}
@@ -572,69 +701,134 @@ export default function App() {
             </p>
           </motion.div>
 
-          <Card className="p-6 text-left">
-            <div className="space-y-6">
-              <div>
-                <label className="block text-sm font-bold text-slate-700 mb-2 uppercase tracking-wider">{t.labelLessonTitle}</label>
+          {/* Topic Selection/Creation */}
+          <div className="mb-8 space-y-4">
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="flex-grow relative">
                 <input 
-                  type="text" 
-                  value={lessonTitle}
-                  onChange={(e) => setLessonTitle(e.target.value)}
-                  placeholder={t.placeholderLessonTitle}
+                  type="text"
+                  value={newTopicName}
+                  onChange={(e) => setNewTopicName(e.target.value)}
+                  placeholder={t.placeholderTopic}
                   className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
                 />
               </div>
-              <div>
-                <div className="flex justify-between items-center mb-2">
-                  <label className="block text-sm font-bold text-slate-700 uppercase tracking-wider">{t.labelContent}</label>
-                  <button 
-                    onClick={() => fileInputRef.current?.click()}
-                    className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1.5 transition-colors"
-                  >
-                    <FileUp className="w-3.5 h-3.5" />
-                    {t.btnUpload}
-                  </button>
-                  <input 
-                    type="file" 
-                    ref={fileInputRef} 
-                    onChange={handleFileUpload} 
-                    accept=".txt,.srt" 
-                    className="hidden" 
-                  />
-                </div>
-                <textarea 
-                  value={content}
-                  onChange={(e) => setContent(e.target.value)}
-                  placeholder={t.placeholderContent}
-                  rows={8}
-                  className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all resize-none"
-                />
-              </div>
-              
-              {error && (
-                <div className="p-4 bg-rose-50 border border-rose-100 rounded-xl flex items-center gap-3 text-rose-700">
-                  <AlertCircle className="w-5 h-5 flex-shrink-0" />
-                  <p className="text-sm font-medium">{error}</p>
-                </div>
-              )}
-
               <button 
-                onClick={generateMaterial}
-                disabled={isLoading}
-                className="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3"
+                onClick={createTopic}
+                className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-100 flex items-center justify-center gap-2 whitespace-nowrap"
               >
-                {isLoading ? (
-                  <>
-                    <Loader2 className="w-6 h-6 animate-spin" />
-                    {t.btnGenerating}
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="w-5 h-5" />
-                    {t.btnGenerate}
-                  </>
-                )}
+                <Sparkles className="w-4 h-4" />
+                {t.btnCreateTopic}
               </button>
+            </div>
+
+            {topics.length > 0 && (
+              <div className="flex flex-wrap gap-2 justify-center">
+                {topics.map(topic => (
+                  <button
+                    key={topic.id}
+                    onClick={() => setActiveTopicId(topic.id)}
+                    className={cn(
+                      "px-4 py-2 rounded-full text-sm font-bold border transition-all",
+                      activeTopicId === topic.id 
+                        ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-100" 
+                        : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300"
+                    )}
+                  >
+                    {topic.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <Card className="p-6 text-left">
+            <div className="space-y-6">
+              {!activeTopicId ? (
+                <div className="p-8 text-center border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50">
+                  <AlertCircle className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                  <p className="text-slate-500 font-medium">{t.noTopicSelected}</p>
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-2 uppercase tracking-wider">{t.labelLessonTitle}</label>
+                    <input 
+                      type="text" 
+                      value={lessonTitle}
+                      onChange={(e) => setLessonTitle(e.target.value)}
+                      placeholder={t.placeholderLessonTitle}
+                      className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
+                    />
+                  </div>
+                  <div>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="block text-sm font-bold text-slate-700 uppercase tracking-wider">{t.labelContent}</label>
+                      <button 
+                        onClick={() => fileInputRef.current?.click()}
+                        className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1.5 transition-colors"
+                      >
+                        <FileUp className="w-3.5 h-3.5" />
+                        {t.btnUpload}
+                      </button>
+                      <input 
+                        type="file" 
+                        ref={fileInputRef} 
+                        onChange={handleFileUpload} 
+                        accept=".txt,.srt,.mp3,.wav,.m4a" 
+                        className="hidden" 
+                      />
+                    </div>
+                    {audioData && (
+                      <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-xl flex items-center gap-3 text-indigo-700 mb-4">
+                        <RefreshCcw className="w-5 h-5 animate-pulse" />
+                        <p className="text-sm font-medium">Audio file ready for analysis</p>
+                        <button 
+                          onClick={() => setAudioData(null)}
+                          className="ml-auto text-xs font-bold text-indigo-400 hover:text-indigo-600"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    )}
+                    <textarea 
+                      value={content}
+                      onChange={(e) => {
+                        setContent(e.target.value);
+                        if (e.target.value.trim()) setAudioData(null);
+                      }}
+                      placeholder={t.placeholderContent}
+                      rows={8}
+                      className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all resize-none"
+                    />
+                  </div>
+                  
+                  {error && (
+                    <div className="p-4 bg-rose-50 border border-rose-100 rounded-xl flex items-center gap-3 text-rose-700">
+                      <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                      <p className="text-sm font-medium">{error}</p>
+                    </div>
+                  )}
+
+                  <button 
+                    onClick={generateMaterial}
+                    disabled={isLoading}
+                    className="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3"
+                  >
+                    {isLoading ? (
+                      <>
+                        <Loader2 className="w-6 h-6 animate-spin" />
+                        {t.btnGenerating}
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-5 h-5" />
+                        {t.btnGenerate}
+                      </>
+                    )}
+                  </button>
+                </>
+              )}
             </div>
           </Card>
         </section>
@@ -730,14 +924,9 @@ export default function App() {
                       <h3 className="text-xl font-bold text-slate-900">{t.titleFlashcards}</h3>
                     </div>
                     <div className="space-y-4">
-                      {material.flashcards.slice(0, 3).map((card, idx) => (
+                      {material.flashcards.map((card, idx) => (
                         <FlashcardComponent key={idx} card={card} lang={lang} />
                       ))}
-                      {material.flashcards.length > 3 && (
-                        <p className="text-center text-sm text-slate-400 font-medium italic">
-                          + {material.flashcards.length - 3} more cards generated
-                        </p>
-                      )}
                     </div>
                   </section>
 
