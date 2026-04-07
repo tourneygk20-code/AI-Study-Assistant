@@ -379,6 +379,7 @@ export default function App() {
   const [newTopicName, setNewTopicName] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isCopied, setIsCopied] = useState(false);
   const resultsRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1084,11 +1085,13 @@ export default function App() {
                 <button 
                   onClick={() => {
                     navigator.clipboard.writeText(JSON.stringify(material, null, 2));
-                    alert("Copied to clipboard!");
+                    setIsCopied(true);
+                    setTimeout(() => setIsCopied(false), 2000);
                   }}
-                  className="px-6 py-3 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2"
+                  className="px-6 py-3 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2 relative"
                 >
-                  <Copy className="w-5 h-5" /> {t.btnCopy}
+                  <Copy className="w-5 h-5" /> 
+                  {isCopied ? (lang === "en" ? "Copied!" : "Đã chép!") : t.btnCopy}
                 </button>
                 <button 
                   onClick={() => {
