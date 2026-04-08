@@ -1,1 +1,26 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@layer base {
+  .markdown-body table {
+    @apply w-full border-collapse border border-slate-200 my-4;
+  }
+  .markdown-body th {
+    @apply border border-slate-200 bg-slate-50 px-4 py-2 font-bold text-left;
+  }
+  .markdown-body td {
+    @apply border border-slate-200 px-4 py-2;
+  }
+  .markdown-body ul {
+    @apply list-disc list-inside my-4;
+  }
+  .markdown-body ol {
+    @apply list-decimal list-inside my-4;
+  }
+  .markdown-body img {
+    @apply rounded-xl max-w-full h-auto my-4 shadow-sm border border-slate-100;
+  }
+  .markdown-body input[type="checkbox"] {
+    @apply mr-2;
+  }
+}

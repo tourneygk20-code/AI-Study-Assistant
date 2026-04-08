@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect } from "react";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { 
   BookOpen, 
   Brain, 
@@ -29,10 +29,23 @@ import {
   Upload,
   Languages,
   FileUp,
-  Video
+  Video,
+  FileCode,
+  FileText as FileTextIcon,
+  ListTodo,
+  Table as TableIcon,
+  ImagePlus,
+  Save,
+  Edit3,
+  Check,
+  GripVertical,
+  Trash2,
+  Plus,
+  Type as TypeIcon
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion, AnimatePresence, Reorder } from "motion/react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
@@ -74,6 +87,8 @@ const translations = {
     btnNext: "Next Question",
     btnFinish: "Finish Quiz",
     btnExport: "Export PDF",
+    btnExportMarkdown: "Export Markdown",
+    btnExportText: "Export Text",
     btnCopy: "Copy JSON",
     btnNew: "Start New Lesson",
     btnHistory: "History",
@@ -95,7 +110,26 @@ const translations = {
     labelParts: "Content Parts",
     partIndicator: "Part {current} of {total}",
     btnSplit: "Split Large File",
-    splitSuccess: "File split into {count} parts. You can process them one by one."
+    splitSuccess: "File split into {count} parts. You can process them one by one.",
+    titleUserNotes: "My Notes",
+    placeholderUserNotes: "Write your own notes here... (Supports Markdown, Tables, Checklists)",
+    btnSaveNotes: "Save Notes",
+    btnUploadImage: "Add Image",
+    btnInsertTable: "Insert Table",
+    btnInsertTodo: "Insert Checklist",
+    notesSaved: "Notes saved successfully!",
+    addTextBlock: "Add Text",
+    addTableBlock: "Add Table",
+    addTodoBlock: "Add Checklist",
+    addImageBlock: "Add Image",
+    blockPlaceholderText: "Write your text here...",
+    blockPlaceholderTable: "Edit table markdown...",
+    blockPlaceholderTodo: "Add a task...",
+    confirmDeleteBlock: "Delete this block?",
+    tableAddRow: "Add Row",
+    tableAddCol: "Add Column",
+    tableRemoveRow: "Remove Row",
+    tableRemoveCol: "Remove Column"
   },
   vi: {
     appName: "Trợ lý Học tập AI",
@@ -126,6 +160,8 @@ const translations = {
     btnNext: "Câu tiếp theo",
     btnFinish: "Kết thúc",
     btnExport: "Xuất PDF",
+    btnExportMarkdown: "Xuất Markdown",
+    btnExportText: "Xuất Văn bản",
     btnCopy: "Sao chép JSON",
     btnNew: "Bắt đầu bài học mới",
     btnHistory: "Lịch sử",
@@ -147,7 +183,26 @@ const translations = {
     labelParts: "Các phần nội dung",
     partIndicator: "Phần {current} trên {total}",
     btnSplit: "Cắt tệp lớn",
-    splitSuccess: "Tệp đã được cắt thành {count} phần. Bạn có thể xử lý từng phần một."
+    splitSuccess: "Tệp đã được cắt thành {count} phần. Bạn có thể xử lý từng phần một.",
+    titleUserNotes: "Ghi chú của tôi",
+    placeholderUserNotes: "Viết ghi chú của bạn tại đây... (Hỗ trợ Markdown, Bảng, Danh sách công việc)",
+    btnSaveNotes: "Lưu ghi chú",
+    btnUploadImage: "Thêm hình ảnh",
+    btnInsertTable: "Thêm bảng",
+    btnInsertTodo: "Thêm danh sách",
+    notesSaved: "Đã lưu ghi chú!",
+    addTextBlock: "Thêm văn bản",
+    addTableBlock: "Thêm bảng",
+    addTodoBlock: "Thêm danh sách",
+    addImageBlock: "Thêm hình ảnh",
+    blockPlaceholderText: "Viết nội dung tại đây...",
+    blockPlaceholderTable: "Chỉnh sửa bảng...",
+    blockPlaceholderTodo: "Thêm công việc...",
+    confirmDeleteBlock: "Xóa đoạn này?",
+    tableAddRow: "Thêm dòng",
+    tableAddCol: "Thêm cột",
+    tableRemoveRow: "Xóa dòng",
+    tableRemoveCol: "Xóa cột"
   }
 };
 
@@ -175,6 +230,22 @@ interface QuizItem {
   correct: string;
 }
 
+type NoteBlockType = 'text' | 'table' | 'todo' | 'image';
+
+interface TodoItem {
+  id: string;
+  text: string;
+  completed: boolean;
+}
+
+interface NoteBlock {
+  id: string;
+  type: NoteBlockType;
+  content: string; // Markdown for text/table, Base64 for image
+  todoItems?: TodoItem[];
+  tableData?: string[][]; // 2D array for visual table editor
+}
+
 interface LearningMaterial {
   id: string;
   topicId: string;
@@ -186,6 +257,8 @@ interface LearningMaterial {
   flashcards: Flashcard[];
   quiz: QuizItem[];
   review_strategy: string;
+  user_notes?: string; // Keep for backward compatibility/migration
+  user_blocks?: NoteBlock[];
   timestamp: number;
 }
 
@@ -363,6 +436,610 @@ const QuizComponent = ({ quiz, lang }: { quiz: QuizItem[], lang: Language }) => 
   );
 };
 
+// --- Export Helpers ---
+const convertToMarkdown = (material: LearningMaterial) => {
+  let md = `# ${material.title}\n\n`;
+  md += `> ${material.summary}\n\n`;
+  
+  md += `## Key Sections\n\n`;
+  material.sections.forEach((s, i) => {
+    md += `### ${i + 1}. ${s.title}\n`;
+    s.key_points.forEach(p => md += `- ${p}\n`);
+    md += `\n`;
+  });
+  
+  md += `## Core Concepts\n\n`;
+  material.concepts.forEach(c => {
+    md += `### ${c.name} (${c.importance.toUpperCase()})\n`;
+    md += `${c.explanation}\n`;
+    if (c.example) md += `*Example: ${c.example}*\n`;
+    md += `\n`;
+  });
+  
+  md += `## Study Notes\n\n`;
+  md += `${material.learning_notes}\n\n`;
+  
+  md += `## Flashcards\n\n`;
+  material.flashcards.forEach((f, i) => {
+    md += `**Q${i + 1}: ${f.question}**\n`;
+    md += `A: ${f.answer}\n\n`;
+  });
+  
+  md += `## Quiz\n\n`;
+  material.quiz.forEach((q, i) => {
+    md += `**Q${i + 1}: ${q.question}**\n`;
+    q.options.forEach(o => md += `- ${o}\n`);
+    md += `*Correct Answer: ${q.correct}*\n\n`;
+  });
+  
+  md += `## Review Strategy\n\n`;
+  md += `${material.review_strategy}\n\n`;
+  
+  if (material.user_blocks && material.user_blocks.length > 0) {
+    md += `## My Notes\n\n`;
+    material.user_blocks.forEach(block => {
+      if (block.type === 'text') {
+        md += `${block.content}\n\n`;
+      } else if (block.type === 'table') {
+        if (block.tableData) {
+          md += `${tableToMarkdown(block.tableData)}\n\n`;
+        } else {
+          md += `${block.content}\n\n`;
+        }
+      } else if (block.type === 'todo') {
+        block.todoItems?.forEach(item => {
+          md += `- [${item.completed ? 'x' : ' '}] ${item.text}\n`;
+        });
+        md += `\n`;
+      } else if (block.type === 'image') {
+        md += `![User Image](${block.content})\n\n`;
+      }
+    });
+  } else if (material.user_notes) {
+    md += `## My Notes\n\n`;
+    md += `${material.user_notes}\n`;
+  }
+  
+  return md;
+};
+
+const convertToPlainText = (material: LearningMaterial) => {
+  let txt = `${material.title.toUpperCase()}\n`;
+  txt += `========================================\n\n`;
+  txt += `${material.summary}\n\n`;
+  
+  txt += `KEY SECTIONS\n`;
+  txt += `------------\n`;
+  material.sections.forEach((s, i) => {
+    txt += `${i + 1}. ${s.title}\n`;
+    s.key_points.forEach(p => txt += `   - ${p}\n`);
+    txt += `\n`;
+  });
+  
+  txt += `CORE CONCEPTS\n`;
+  txt += `-------------\n`;
+  material.concepts.forEach(c => {
+    txt += `${c.name} [Importance: ${c.importance}]\n`;
+    txt += `Explanation: ${c.explanation}\n`;
+    if (c.example) txt += `Example: ${c.example}\n`;
+    txt += `\n`;
+  });
+  
+  txt += `STUDY NOTES\n`;
+  txt += `-----------\n`;
+  // Simple regex to remove some markdown syntax for plain text
+  txt += `${material.learning_notes.replace(/[#*`]/g, '')}\n\n`;
+  
+  txt += `FLASHCARDS\n`;
+  txt += `----------\n`;
+  material.flashcards.forEach((f, i) => {
+    txt += `Q${i + 1}: ${f.question}\n`;
+    txt += `A: ${f.answer}\n\n`;
+  });
+  
+  txt += `QUIZ\n`;
+  txt += `----\n`;
+  material.quiz.forEach((q, i) => {
+    txt += `Q${i + 1}: ${q.question}\n`;
+    q.options.forEach(o => txt += `   - ${o}\n`);
+    txt += `Correct Answer: ${q.correct}\n\n`;
+  });
+  
+  txt += `REVIEW STRATEGY\n`;
+  txt += `---------------\n`;
+  txt += `${material.review_strategy}\n\n`;
+  
+  if (material.user_blocks && material.user_blocks.length > 0) {
+    txt += `MY NOTES\n`;
+    txt += `--------\n`;
+    material.user_blocks.forEach(block => {
+      if (block.type === 'text') {
+        txt += `${block.content.replace(/[#*`]/g, '')}\n\n`;
+      } else if (block.type === 'table') {
+        if (block.tableData) {
+          txt += `${tableToMarkdown(block.tableData).replace(/[#*`]/g, '')}\n\n`;
+        } else {
+          txt += `${block.content.replace(/[#*`]/g, '')}\n\n`;
+        }
+      } else if (block.type === 'todo') {
+        block.todoItems?.forEach(item => {
+          txt += `[${item.completed ? 'x' : ' '}] ${item.text}\n`;
+        });
+        txt += `\n`;
+      } else if (block.type === 'image') {
+        txt += `[Image Attached]\n\n`;
+      }
+    });
+  } else if (material.user_notes) {
+    txt += `MY NOTES\n`;
+    txt += `--------\n`;
+    txt += `${material.user_notes.replace(/[#*`]/g, '')}\n`;
+  }
+  
+  return txt;
+};
+
+const downloadFile = (content: string, fileName: string, contentType: string) => {
+  const blob = new Blob([content], { type: contentType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const MarkdownComponents = {
+  img: ({ ...props }) => (
+    <img 
+      {...props} 
+      referrerPolicy="no-referrer" 
+      className="rounded-xl max-w-full h-auto my-4 shadow-sm border border-slate-100" 
+    />
+  )
+};
+
+const tableToMarkdown = (data: string[][]) => {
+  if (!data || data.length === 0) return "";
+  const headers = data[0];
+  const rows = data.slice(1);
+  
+  let md = `| ${headers.join(" | ")} |\n`;
+  md += `| ${headers.map(() => "---").join(" | ")} |\n`;
+  rows.forEach(row => {
+    md += `| ${row.join(" | ")} |\n`;
+  });
+  return md;
+};
+
+const VisualTableEditor = ({ 
+  data, 
+  onChange, 
+  lang 
+}: { 
+  data: string[][]; 
+  onChange: (newData: string[][]) => void;
+  lang: Language;
+}) => {
+  const t = translations[lang];
+
+  const updateCell = (rowIndex: number, colIndex: number, value: string) => {
+    const newData = data.map((row, rIdx) => 
+      rIdx === rowIndex ? row.map((cell, cIdx) => cIdx === colIndex ? value : cell) : row
+    );
+    onChange(newData);
+  };
+
+  const addRow = () => {
+    const numCols = data[0]?.length || 2;
+    onChange([...data, Array(numCols).fill("")]);
+  };
+
+  const addCol = () => {
+    onChange(data.map(row => [...row, ""]));
+  };
+
+  const removeRow = (rowIndex: number) => {
+    if (data.length <= 1) return;
+    onChange(data.filter((_, idx) => idx !== rowIndex));
+  };
+
+  const removeCol = (colIndex: number) => {
+    if (data[0].length <= 1) return;
+    onChange(data.map(row => row.filter((_, idx) => idx !== colIndex)));
+  };
+
+  return (
+    <div className="overflow-x-auto border border-slate-200 rounded-xl bg-white shadow-sm">
+      <table className="w-full border-collapse min-w-[400px]">
+        <thead>
+          <tr className="bg-slate-50 border-b border-slate-200">
+            <th className="w-10"></th>
+            {data[0].map((_, colIdx) => (
+              <th key={colIdx} className="p-2 border-r border-slate-200 group relative">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] uppercase text-slate-400 font-bold">Col {colIdx + 1}</span>
+                  <button 
+                    onClick={() => removeCol(colIdx)}
+                    className="opacity-0 group-hover:opacity-100 p-1 text-slate-300 hover:text-rose-500 transition-all"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((row, rowIdx) => (
+            <tr key={rowIdx} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50 transition-colors">
+              <td className="bg-slate-50/50 border-r border-slate-200 p-2 text-center group relative">
+                <span className="text-[10px] text-slate-400 font-bold">{rowIdx + 1}</span>
+                <button 
+                  onClick={() => removeRow(rowIdx)}
+                  className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 bg-rose-50 text-rose-500 transition-all"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              </td>
+              {row.map((cell, colIdx) => (
+                <td key={colIdx} className="p-0 border-r border-slate-100 last:border-0">
+                  <input 
+                    type="text"
+                    value={cell}
+                    onChange={(e) => updateCell(rowIdx, colIdx, e.target.value)}
+                    className="w-full px-3 py-2 bg-transparent border-none focus:ring-2 focus:ring-indigo-500/20 outline-none text-sm"
+                    placeholder="..."
+                  />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="p-2 bg-slate-50 flex gap-2 border-t border-slate-200">
+        <button 
+          onClick={addRow}
+          className="px-3 py-1 bg-white border border-slate-200 rounded-lg text-[10px] font-bold text-slate-600 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-sm"
+        >
+          <Plus className="w-3 h-3" /> {t.tableAddRow}
+        </button>
+        <button 
+          onClick={addCol}
+          className="px-3 py-1 bg-white border border-slate-200 rounded-lg text-[10px] font-bold text-slate-600 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-sm"
+        >
+          <Plus className="w-3 h-3" /> {t.tableAddCol}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const UserNotes = ({ 
+  initialBlocks,
+  initialNotes, // For migration
+  onSave, 
+  lang 
+}: { 
+  initialBlocks?: NoteBlock[];
+  initialNotes?: string;
+  onSave: (blocks: NoteBlock[]) => void; 
+  lang: Language 
+}) => {
+  const [blocks, setBlocks] = useState<NoteBlock[]>(() => {
+    if (initialBlocks && initialBlocks.length > 0) return initialBlocks;
+    if (initialNotes) return [{ id: crypto.randomUUID(), type: 'text', content: initialNotes }];
+    return [];
+  });
+  const [isEditing, setIsEditing] = useState(false);
+  const [showSaved, setShowSaved] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const t = translations[lang];
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleSave = () => {
+    onSave(blocks);
+    setIsEditing(false);
+    setShowSaved(true);
+    setTimeout(() => setShowSaved(false), 2000);
+  };
+
+  const addBlock = (type: NoteBlockType) => {
+    const newBlock: NoteBlock = {
+      id: crypto.randomUUID(),
+      type,
+      content: "",
+      todoItems: type === 'todo' ? [] : undefined,
+      tableData: type === 'table' ? [["Header 1", "Header 2"], ["Cell 1", "Cell 2"]] : undefined
+    };
+    setBlocks([...blocks, newBlock]);
+    setIsEditing(true);
+  };
+
+  const updateBlock = (id: string, updates: Partial<NoteBlock>) => {
+    setBlocks(blocks.map(b => b.id === id ? { ...b, ...updates } : b));
+  };
+
+  const removeBlock = (id: string) => {
+    if (confirmingDelete === id) {
+      setBlocks(blocks.filter(b => b.id !== id));
+      setConfirmingDelete(null);
+    } else {
+      setConfirmingDelete(id);
+      setTimeout(() => setConfirmingDelete(null), 3000);
+    }
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    setUploadError(null);
+    if (file) {
+      if (file.size > 1.5 * 1024 * 1024) {
+        setUploadError(lang === "en" ? "Image is too large (max 1.5MB)" : "Hình ảnh quá lớn (tối đa 1.5MB)");
+        setTimeout(() => setUploadError(null), 5000);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const base64 = event.target?.result as string;
+        if (base64) {
+          const newBlock: NoteBlock = {
+            id: crypto.randomUUID(),
+            type: 'image',
+            content: base64
+          };
+          setBlocks([...blocks, newBlock]);
+          setIsEditing(true);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-2">
+          <Edit3 className="w-6 h-6 text-indigo-600" />
+          <h3 className="text-xl font-bold text-slate-900">{t.titleUserNotes}</h3>
+        </div>
+        <div className="flex items-center gap-2">
+          {isEditing ? (
+            <button 
+              onClick={handleSave}
+              className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-bold text-sm hover:bg-indigo-700 transition-all flex items-center gap-2"
+            >
+              <Save className="w-4 h-4" /> {t.btnSaveNotes}
+            </button>
+          ) : (
+            <button 
+              onClick={() => setIsEditing(true)}
+              className="px-4 py-2 bg-white border border-slate-200 text-slate-600 rounded-lg font-bold text-sm hover:bg-slate-50 transition-all flex items-center gap-2"
+            >
+              <Edit3 className="w-4 h-4" /> Edit
+            </button>
+          )}
+          <AnimatePresence>
+            {showSaved && (
+              <motion.span 
+                initial={{ opacity: 0, x: 10 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0 }}
+                className="text-emerald-600 text-xs font-bold flex items-center gap-1"
+              >
+                <Check className="w-3 h-3" /> {t.notesSaved}
+              </motion.span>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+
+      <div className="space-y-6">
+        <Reorder.Group axis="y" values={blocks} onReorder={setBlocks} className="space-y-4">
+          {blocks.map((block) => (
+            <Reorder.Item key={block.id} value={block} className="relative group">
+              <div className="flex gap-3">
+                {isEditing && (
+                  <div className="flex flex-col gap-2 pt-2">
+                    <div className="cursor-grab active:cursor-grabbing p-1 text-slate-300 hover:text-slate-500">
+                      <GripVertical className="w-4 h-4" />
+                    </div>
+                    <button 
+                      onClick={() => removeBlock(block.id)}
+                      className={cn(
+                        "p-1 transition-all rounded-md",
+                        confirmingDelete === block.id 
+                          ? "bg-rose-100 text-rose-600 animate-pulse" 
+                          : "text-slate-300 hover:text-rose-500"
+                      )}
+                      title={confirmingDelete === block.id ? "Click again to confirm" : "Delete block"}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+                
+                <div className="flex-grow">
+                  {block.type === 'text' && (
+                    isEditing ? (
+                      <textarea
+                        value={block.content}
+                        onChange={(e) => updateBlock(block.id, { content: e.target.value })}
+                        placeholder={t.blockPlaceholderText}
+                        rows={3}
+                        className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all resize-none text-sm"
+                      />
+                    ) : (
+                      <div className="markdown-body text-sm">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents}>
+                          {block.content}
+                        </ReactMarkdown>
+                      </div>
+                    )
+                  )}
+
+                  {block.type === 'table' && (
+                    isEditing ? (
+                      <VisualTableEditor 
+                        data={block.tableData || [["Header 1", "Header 2"], ["Cell 1", "Cell 2"]]} 
+                        onChange={(newData) => updateBlock(block.id, { tableData: newData })}
+                        lang={lang}
+                      />
+                    ) : (
+                      <div className="markdown-body overflow-x-auto">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents}>
+                          {block.tableData ? tableToMarkdown(block.tableData) : block.content}
+                        </ReactMarkdown>
+                      </div>
+                    )
+                  )}
+
+                  {block.type === 'todo' && (
+                    <div className="space-y-2">
+                      {(block.todoItems || []).map((item) => (
+                        <div key={item.id} className="flex items-center gap-3 group/item">
+                          <input 
+                            type="checkbox" 
+                            checked={item.completed}
+                            onChange={(e) => {
+                              const newItems = (block.todoItems || []).map(ti => 
+                                ti.id === item.id ? { ...ti, completed: e.target.checked } : ti
+                              );
+                              updateBlock(block.id, { todoItems: newItems });
+                            }}
+                            className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                          {isEditing ? (
+                            <input 
+                              type="text"
+                              value={item.text}
+                              onChange={(e) => {
+                                const newItems = (block.todoItems || []).map(ti => 
+                                  ti.id === item.id ? { ...ti, text: e.target.value } : ti
+                                );
+                                updateBlock(block.id, { todoItems: newItems });
+                              }}
+                              className="flex-grow bg-transparent border-none focus:ring-0 text-sm p-0"
+                            />
+                          ) : (
+                            <span className={cn("text-sm", item.completed && "line-through text-slate-400")}>
+                              {item.text}
+                            </span>
+                          )}
+                          {isEditing && (
+                            <button 
+                              onClick={() => {
+                                const newItems = (block.todoItems || []).filter(ti => ti.id !== item.id);
+                                updateBlock(block.id, { todoItems: newItems });
+                              }}
+                              className="opacity-0 group-hover/item:opacity-100 p-1 text-slate-300 hover:text-rose-500 transition-all"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                      {isEditing && (
+                        <button 
+                          onClick={() => {
+                            const newItem = { id: crypto.randomUUID(), text: "", completed: false };
+                            updateBlock(block.id, { todoItems: [...(block.todoItems || []), newItem] });
+                          }}
+                          className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 mt-2"
+                        >
+                          <Plus className="w-3 h-3" /> {t.blockPlaceholderTodo}
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {block.type === 'image' && (
+                    <div className="relative group/img">
+                      <img 
+                        src={block.content} 
+                        alt="User uploaded" 
+                        referrerPolicy="no-referrer"
+                        className="rounded-xl max-w-full h-auto shadow-sm border border-slate-100"
+                      />
+                      {isEditing && (
+                        <div className="absolute top-2 right-2 opacity-0 group-hover/img:opacity-100 transition-all flex gap-2">
+                          <button 
+                            onClick={() => removeBlock(block.id)}
+                            className={cn(
+                              "p-2 backdrop-blur shadow-sm rounded-full transition-all",
+                              confirmingDelete === block.id 
+                                ? "bg-rose-500 text-white animate-pulse" 
+                                : "bg-white/90 text-rose-500 hover:bg-rose-50"
+                            )}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Reorder.Item>
+          ))}
+        </Reorder.Group>
+
+        {isEditing && (
+          <div className="flex flex-col gap-4 pt-4 border-t border-slate-100">
+            <AnimatePresence>
+              {uploadError && (
+                <motion.div 
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  className="p-3 bg-rose-50 text-rose-600 text-xs font-bold rounded-xl border border-rose-100 flex items-center gap-2"
+                >
+                  <AlertCircle className="w-4 h-4" />
+                  {uploadError}
+                </motion.div>
+              )}
+            </AnimatePresence>
+            <div className="flex flex-wrap gap-2">
+              <button 
+                onClick={() => addBlock('text')}
+                className="px-3 py-2 bg-slate-50 text-slate-600 rounded-xl text-xs font-bold hover:bg-slate-100 transition-all flex items-center gap-2"
+              >
+                <TypeIcon className="w-4 h-4" /> {t.addTextBlock}
+              </button>
+              <button 
+                onClick={() => addBlock('table')}
+                className="px-3 py-2 bg-slate-50 text-slate-600 rounded-xl text-xs font-bold hover:bg-slate-100 transition-all flex items-center gap-2"
+              >
+                <TableIcon className="w-4 h-4" /> {t.addTableBlock}
+              </button>
+              <button 
+                onClick={() => addBlock('todo')}
+                className="px-3 py-2 bg-slate-50 text-slate-600 rounded-xl text-xs font-bold hover:bg-slate-100 transition-all flex items-center gap-2"
+              >
+                <ListTodo className="w-4 h-4" /> {t.addTodoBlock}
+              </button>
+              <button 
+                onClick={() => fileInputRef.current?.click()}
+                className="px-3 py-2 bg-slate-50 text-slate-600 rounded-xl text-xs font-bold hover:bg-slate-100 transition-all flex items-center gap-2"
+              >
+                <ImagePlus className="w-4 h-4" /> {t.addImageBlock}
+              </button>
+              <input 
+                type="file" 
+                ref={fileInputRef} 
+                onChange={handleImageUpload} 
+                accept="image/*" 
+                className="hidden" 
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+};
+
 // --- Main App ---
 
 export default function App() {
@@ -388,12 +1065,14 @@ export default function App() {
   // Load history from localStorage
   useEffect(() => {
     const savedTopics = localStorage.getItem("learning_topics");
-    if (savedTopics) {
+    if (savedTopics && savedTopics !== "undefined") {
       try {
         const parsed = JSON.parse(savedTopics);
-        setTopics(parsed);
-        if (parsed.length > 0) {
-          setActiveTopicId(parsed[0].id);
+        if (Array.isArray(parsed)) {
+          setTopics(parsed);
+          if (parsed.length > 0) {
+            setActiveTopicId(parsed[0].id);
+          }
         }
       } catch (e) {
         console.error("Failed to parse history", e);
@@ -419,6 +1098,21 @@ export default function App() {
 
     setTopics(updatedTopics);
     localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+  };
+
+  const updateMaterialBlocks = (materialId: string, blocks: NoteBlock[]) => {
+    const updatedTopics = topics.map(topic => ({
+      ...topic,
+      lessons: topic.lessons.map(lesson => 
+        lesson.id === materialId ? { ...lesson, user_blocks: blocks } : lesson
+      )
+    }));
+    setTopics(updatedTopics);
+    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+    
+    if (material && material.id === materialId) {
+      setMaterial({ ...material, user_blocks: blocks });
+    }
   };
 
   const createTopic = () => {
@@ -549,62 +1243,62 @@ export default function App() {
           systemInstruction: `You are an expert AI Learning Assistant. Your goal is to transform raw text, transcripts, audio files, or video files into highly effective, structured learning materials that facilitate long-term memory and understanding. Ignore noise and repetitions. Be clear, concise, and insightful. Respond in ${lang === "en" ? "English" : "Vietnamese"}. ALWAYS generate at least 10 flashcards and 10 quiz questions for any content provided.`,
           responseMimeType: "application/json",
           responseSchema: {
-            type: Type.OBJECT,
+            type: "object",
             properties: {
-              title: { type: Type.STRING },
-              summary: { type: Type.STRING },
+              title: { type: "string" },
+              summary: { type: "string" },
               sections: {
-                type: Type.ARRAY,
+                type: "array",
                 items: {
-                  type: Type.OBJECT,
+                  type: "object",
                   properties: {
-                    title: { type: Type.STRING },
-                    key_points: { type: Type.ARRAY, items: { type: Type.STRING } }
+                    title: { type: "string" },
+                    key_points: { type: "array", items: { type: "string" } }
                   },
                   required: ["title", "key_points"]
                 }
               },
               concepts: {
-                type: Type.ARRAY,
+                type: "array",
                 items: {
-                  type: Type.OBJECT,
+                  type: "object",
                   properties: {
-                    name: { type: Type.STRING },
-                    explanation: { type: Type.STRING },
-                    example: { type: Type.STRING },
-                    importance: { type: Type.STRING, enum: ["low", "medium", "high"] }
+                    name: { type: "string" },
+                    explanation: { type: "string" },
+                    example: { type: "string" },
+                    importance: { type: "string", enum: ["low", "medium", "high"] }
                   },
                   required: ["name", "explanation", "importance"]
                 }
               },
-              learning_notes: { type: Type.STRING, description: "Markdown formatted notes" },
+              learning_notes: { type: "string", description: "Markdown formatted notes" },
               flashcards: {
-                type: Type.ARRAY,
+                type: "array",
                 items: {
-                  type: Type.OBJECT,
+                  type: "object",
                   properties: {
-                    question: { type: Type.STRING },
-                    answer: { type: Type.STRING }
+                    question: { type: "string" },
+                    answer: { type: "string" }
                   },
                   required: ["question", "answer"]
                 }
               },
               quiz: {
-                type: Type.ARRAY,
+                type: "array",
                 items: {
-                  type: Type.OBJECT,
+                  type: "object",
                   properties: {
-                    question: { type: Type.STRING },
-                    options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    correct: { type: Type.STRING }
+                    question: { type: "string" },
+                    options: { type: "array", items: { type: "string" } },
+                    correct: { type: "string" }
                   },
                   required: ["question", "options", "correct"]
                 }
               },
-              review_strategy: { type: Type.STRING }
+              review_strategy: { type: "string" }
             },
             required: ["title", "summary", "sections", "concepts", "learning_notes", "flashcards", "quiz", "review_strategy"]
-          }
+          } as any
         }
       });
  
@@ -1024,8 +1718,26 @@ export default function App() {
                       <h3 className="text-xl font-bold text-slate-900">{t.titleNotes}</h3>
                     </div>
                     <Card className="p-8 prose prose-slate max-w-none prose-headings:text-slate-900 prose-strong:text-indigo-700">
-                      <ReactMarkdown>{material.learning_notes}</ReactMarkdown>
+                      <div className="markdown-body">
+                        <ReactMarkdown 
+                          remarkPlugins={[remarkGfm]}
+                          components={MarkdownComponents}
+                        >
+                          {material.learning_notes}
+                        </ReactMarkdown>
+                      </div>
                     </Card>
+                  </section>
+
+                  {/* User Notes Section */}
+                  <section>
+                    <UserNotes 
+                      key={material.id}
+                      initialBlocks={material.user_blocks}
+                      initialNotes={material.user_notes}
+                      onSave={(blocks) => updateMaterialBlocks(material.id, blocks)}
+                      lang={lang}
+                    />
                   </section>
                 </div>
 
@@ -1081,6 +1793,24 @@ export default function App() {
                   className="px-6 py-3 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2"
                 >
                   <Download className="w-5 h-5" /> {t.btnExport}
+                </button>
+                <button 
+                  onClick={() => {
+                    const md = convertToMarkdown(material);
+                    downloadFile(md, `${material.title.replace(/\s+/g, '_')}.md`, "text/markdown");
+                  }}
+                  className="px-6 py-3 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2"
+                >
+                  <FileCode className="w-5 h-5" /> {t.btnExportMarkdown}
+                </button>
+                <button 
+                  onClick={() => {
+                    const txt = convertToPlainText(material);
+                    downloadFile(txt, `${material.title.replace(/\s+/g, '_')}.txt`, "text/plain");
+                  }}
+                  className="px-6 py-3 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2"
+                >
+                  <FileTextIcon className="w-5 h-5" /> {t.btnExportText}
                 </button>
                 <button 
                   onClick={() => {
