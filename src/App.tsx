@@ -1236,7 +1236,9 @@ export default function App() {
             createdAt: Timestamp.now()
           }, { merge: true });
         } catch (error) {
+          console.error("User sync error:", error);
           handleFirestoreError(error, OperationType.WRITE, `users/${currentUser.uid}`);
+          setError(t.syncError + " (User Profile)");
         }
       }
     });
@@ -1245,29 +1247,49 @@ export default function App() {
 
   // Sync Topics from Firestore
   useEffect(() => {
-    if (!user || !db) {
+    if (!user || !db || !auth.currentUser) {
       setTopics([]);
       setActiveTopicId(null);
       return;
     }
 
-    const q = query(collection(db, "topics"), where("userId", "==", user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const syncedTopics: Topic[] = [];
-      snapshot.forEach((doc) => {
-        syncedTopics.push(doc.data() as Topic);
-      });
-      setTopics(syncedTopics);
-      if (syncedTopics.length > 0 && !activeTopicId) {
-        setActiveTopicId(syncedTopics[0].id);
+    let unsubscribe: (() => void) | null = null;
+    
+    // Use a delay to ensure Auth state is fully propagated to Firestore
+    const timeoutId = setTimeout(() => {
+      if (!auth.currentUser) return;
+      
+      try {
+        const q = query(collection(db, "topics"), where("userId", "==", user.uid));
+        unsubscribe = onSnapshot(q, (snapshot) => {
+          const syncedTopics: Topic[] = [];
+          snapshot.forEach((doc) => {
+            syncedTopics.push(doc.data() as Topic);
+          });
+          setTopics(syncedTopics);
+          if (syncedTopics.length > 0 && !activeTopicId) {
+            setActiveTopicId(syncedTopics[0].id);
+          }
+        }, (error) => {
+          // Only show error if we are still authenticated
+          if (auth.currentUser) {
+            console.error("Topics sync error:", error);
+            handleFirestoreError(error, OperationType.LIST, "topics");
+            setError(t.syncError + " (Topics): " + (error instanceof Error ? error.message : String(error)));
+          }
+        });
+      } catch (err) {
+        console.error("Error setting up onSnapshot:", err);
       }
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, "topics");
-      setError(t.syncError);
-    });
+    }, 1000); // Increased delay to 1000ms for better stability
 
-    return () => unsubscribe();
-  }, [user]);
+    return () => {
+      clearTimeout(timeoutId);
+      if (unsubscribe) {
+        unsubscribe();
+      }
+    };
+  }, [user, isAuthReady]);
 
   const handleSignIn = async () => {
     try {

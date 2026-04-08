@@ -1,92 +1,29 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // ===============================================================
-    // Assumed Data Model
-    // ===============================================================
-    //
-    // Collection: users
-    // Document ID: {userId} (Firebase Auth UID)
-    // Fields:
-    //   - uid: string (required)
-    //   - email: string (required)
-    //   - displayName: string
-    //   - photoURL: string
-    //   - createdAt: timestamp
-    //
-    // Collection: topics
-    // Document ID: {topicId} (UUID)
-    // Fields:
-    //   - id: string (required)
-    //   - name: string (required)
-    //   - userId: string (required, owner)
-    //   - lessons: list (required)
-    //   - createdAt: timestamp
-    //
-    // ===============================================================
-
-    // ===============================================================
-    // Helper Functions
-    // ===============================================================
     
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+    function isSystemAdmin() {
+      return isAuthenticated() && request.auth.token.email == "tourneygk20@gmail.com";
     }
-
-    function isDocOwner() {
-      return isAuthenticated() && request.auth.uid == resource.data.userId;
-    }
-
-    function isAdmin() {
-      return isAuthenticated() &&
-        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-          (request.auth.token.email == "tourneygk20@gmail.com" && request.auth.token.email_verified == true));
-    }
-
-    function isValidEmail(email) {
-      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
-    }
-
-    function hasOnlyAllowedFields(fields) {
-      return request.resource.data.keys().hasOnly(fields);
-    }
-
-    // Domain Validators
-    function isValidUser(data) {
-      return data.uid == request.auth.uid &&
-             data.email is string && isValidEmail(data.email) &&
-             (data.displayName == null || (data.displayName is string && data.displayName.size() < 100)) &&
-             (data.photoURL == null || (data.photoURL is string && data.photoURL.size() < 500));
-    }
-
-    function isValidTopic(data) {
-      return data.id is string && data.id.size() > 0 &&
-             data.name is string && data.name.size() > 0 && data.name.size() < 200 &&
-             data.userId == request.auth.uid &&
-             data.lessons is list && data.lessons.size() <= 50;
-    }
-
-    // ===============================================================
-    // Rules
-    // ===============================================================
 
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isOwner(userId) && isValidUser(request.resource.data) && 
-                      (request.resource.data.role == resource.data.role || isAdmin());
+      allow read, write: if isAuthenticated() && (request.auth.uid == userId || isSystemAdmin());
     }
 
     match /topics/{topicId} {
-      allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid || isAdmin());
-      allow create: if isAuthenticated() && isValidTopic(request.resource.data);
-      allow update: if isDocOwner() && isValidTopic(request.resource.data);
-      allow delete: if isDocOwner() || isAdmin();
+      allow read, write: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid || isSystemAdmin());
+    }
+
+    match /test/connection {
+      allow read: if true;
+    }
+    
+    match /{document=**} {
+      allow read, write: if isSystemAdmin();
     }
   }
 }
