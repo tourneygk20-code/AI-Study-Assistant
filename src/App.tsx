@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { GoogleGenAI } from "@google/genai";
 import { 
   BookOpen, 
@@ -43,11 +43,83 @@ import {
   Plus,
   Type as TypeIcon
 } from "lucide-react";
+import { 
+  auth, 
+  db, 
+  googleProvider, 
+  signInWithPopup, 
+  signOut, 
+  onAuthStateChanged, 
+  collection, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  updateDoc, 
+  deleteDoc, 
+  onSnapshot, 
+  query, 
+  where, 
+  orderBy, 
+  Timestamp,
+  User
+} from "./firebase";
 import { motion, AnimatePresence, Reorder } from "motion/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+
+// --- Firestore Error Handling ---
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth?.currentUser?.uid,
+      email: auth?.currentUser?.email,
+      emailVerified: auth?.currentUser?.emailVerified,
+      isAnonymous: auth?.currentUser?.isAnonymous,
+      tenantId: auth?.currentUser?.tenantId,
+      providerInfo: auth?.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  return new Error(JSON.stringify(errInfo));
+}
 
 // --- Utilities ---
 function cn(...inputs: ClassValue[]) {
@@ -129,7 +201,14 @@ const translations = {
     tableAddRow: "Add Row",
     tableAddCol: "Add Column",
     tableRemoveRow: "Remove Row",
-    tableRemoveCol: "Remove Column"
+    tableRemoveCol: "Remove Column",
+    btnSignIn: "Sign in with Google",
+    btnSignOut: "Sign Out",
+    syncing: "Syncing with Cloud...",
+    syncError: "Failed to sync data. Please check your connection.",
+    loginRequired: "Please sign in to save your progress.",
+    firebaseConfigError: "Firebase is not configured correctly. Google Login will not work.",
+    firebaseConfigHint: "Please set up Firebase in the AI Studio menu or provide API keys in the Secrets panel."
   },
   vi: {
     appName: "Trợ lý Học tập AI",
@@ -202,7 +281,14 @@ const translations = {
     tableAddRow: "Thêm dòng",
     tableAddCol: "Thêm cột",
     tableRemoveRow: "Xóa dòng",
-    tableRemoveCol: "Xóa cột"
+    tableRemoveCol: "Xóa cột",
+    btnSignIn: "Đăng nhập với Google",
+    btnSignOut: "Đăng xuất",
+    syncing: "Đang đồng bộ...",
+    syncError: "Đồng bộ thất bại. Vui lòng kiểm tra kết nối.",
+    loginRequired: "Vui lòng đăng nhập để lưu tiến trình.",
+    firebaseConfigError: "Cấu hình Firebase chưa đúng. Đăng nhập Google sẽ không hoạt động.",
+    firebaseConfigHint: "Vui lòng thiết lập Firebase trong menu AI Studio hoặc cung cấp API key trong bảng Secrets."
   }
 };
 
@@ -1040,9 +1126,57 @@ const UserNotes = ({
   );
 };
 
+// --- Error Boundary ---
+export class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean, error: Error | null }> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+          <Card className="max-w-md w-full p-8 text-center space-y-6">
+            <div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto">
+              <AlertCircle className="w-8 h-8" />
+            </div>
+            <div className="space-y-2">
+              <h2 className="text-xl font-bold text-slate-900">Something went wrong</h2>
+              <p className="text-slate-600 text-sm">
+                {this.state.error?.message.startsWith('{') 
+                  ? "A database error occurred. Please check your connection and permissions." 
+                  : (this.state.error?.message || "An unexpected error occurred.")}
+              </p>
+            </div>
+            <button 
+              onClick={() => window.location.reload()}
+              className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all"
+            >
+              Reload Application
+            </button>
+          </Card>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 // --- Main App ---
 
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [lang, setLang] = useState<Language>("en");
   const [lessonTitle, setLessonTitle] = useState("");
   const [content, setContent] = useState("");
@@ -1062,81 +1196,222 @@ export default function App() {
 
   const t = translations[lang];
 
-  // Load history from localStorage
+  // Load history from localStorage (Fallback)
   useEffect(() => {
-    const savedTopics = localStorage.getItem("learning_topics");
-    if (savedTopics && savedTopics !== "undefined") {
-      try {
-        const parsed = JSON.parse(savedTopics);
-        if (Array.isArray(parsed)) {
-          setTopics(parsed);
-          if (parsed.length > 0) {
-            setActiveTopicId(parsed[0].id);
+    if (!user && isAuthReady) {
+      const savedTopics = localStorage.getItem("learning_topics");
+      if (savedTopics && savedTopics !== "undefined") {
+        try {
+          const parsed = JSON.parse(savedTopics);
+          if (Array.isArray(parsed)) {
+            setTopics(parsed);
+            if (parsed.length > 0) {
+              setActiveTopicId(parsed[0].id);
+            }
           }
+        } catch (e) {
+          console.error("Failed to parse history", e);
         }
-      } catch (e) {
-        console.error("Failed to parse history", e);
       }
     }
+  }, [user, isAuthReady]);
+
+  // Auth Listener
+  useEffect(() => {
+    if (!auth) {
+      setIsAuthReady(true);
+      return;
+    }
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
+      if (currentUser) {
+        try {
+          // Sync user profile to Firestore
+          await setDoc(doc(db, "users", currentUser.uid), {
+            uid: currentUser.uid,
+            email: currentUser.email,
+            displayName: currentUser.displayName,
+            photoURL: currentUser.photoURL,
+            createdAt: Timestamp.now()
+          }, { merge: true });
+        } catch (error) {
+          handleFirestoreError(error, OperationType.WRITE, `users/${currentUser.uid}`);
+        }
+      }
+    });
+    return () => unsubscribe();
   }, []);
 
-  // Save history to localStorage
-  const saveToHistory = (newMaterial: LearningMaterial) => {
-    if (!activeTopicId) return;
+  // Sync Topics from Firestore
+  useEffect(() => {
+    if (!user || !db) {
+      setTopics([]);
+      setActiveTopicId(null);
+      return;
+    }
 
-    const updatedTopics = topics.map(topic => {
-      if (topic.id === activeTopicId) {
-        // Add new lesson, avoid duplicates by title within the same topic
-        const filteredLessons = topic.lessons.filter(l => l.title !== newMaterial.title);
-        return {
-          ...topic,
-          lessons: [newMaterial, ...filteredLessons].slice(0, 20)
-        };
+    const q = query(collection(db, "topics"), where("userId", "==", user.uid));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const syncedTopics: Topic[] = [];
+      snapshot.forEach((doc) => {
+        syncedTopics.push(doc.data() as Topic);
+      });
+      setTopics(syncedTopics);
+      if (syncedTopics.length > 0 && !activeTopicId) {
+        setActiveTopicId(syncedTopics[0].id);
       }
-      return topic;
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, "topics");
+      setError(t.syncError);
     });
 
-    setTopics(updatedTopics);
-    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
-  };
+    return () => unsubscribe();
+  }, [user]);
 
-  const updateMaterialBlocks = (materialId: string, blocks: NoteBlock[]) => {
-    const updatedTopics = topics.map(topic => ({
-      ...topic,
-      lessons: topic.lessons.map(lesson => 
-        lesson.id === materialId ? { ...lesson, user_blocks: blocks } : lesson
-      )
-    }));
-    setTopics(updatedTopics);
-    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
-    
-    if (material && material.id === materialId) {
-      setMaterial({ ...material, user_blocks: blocks });
+  const handleSignIn = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (error) {
+      console.error("Sign in error", error);
+      setError("Sign in failed: " + (error instanceof Error ? error.message : String(error)));
     }
   };
 
-  const createTopic = () => {
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      setMaterial(null);
+      setShowHistory(false);
+    } catch (error) {
+      console.error("Sign out error", error);
+    }
+  };
+
+  // Save history to Firestore
+  const saveToHistory = async (newMaterial: LearningMaterial) => {
+    if (!activeTopicId) return;
+
+    try {
+      if (user && db) {
+        const topicRef = doc(db, "topics", activeTopicId);
+        const topicSnap = await getDoc(topicRef);
+        
+        if (topicSnap.exists()) {
+          const topicData = topicSnap.data() as Topic;
+          const filteredLessons = topicData.lessons.filter(l => l.title !== newMaterial.title);
+          await updateDoc(topicRef, {
+            lessons: [newMaterial, ...filteredLessons].slice(0, 50)
+          });
+        }
+      } else {
+        // Local storage fallback
+        const updatedTopics = topics.map(topic => {
+          if (topic.id === activeTopicId) {
+            const filteredLessons = topic.lessons.filter(l => l.title !== newMaterial.title);
+            return {
+              ...topic,
+              lessons: [newMaterial, ...filteredLessons].slice(0, 20)
+            };
+          }
+          return topic;
+        });
+        setTopics(updatedTopics);
+        localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `topics/${activeTopicId}`);
+      setError(t.syncError);
+    }
+  };
+
+  const updateMaterialBlocks = async (materialId: string, blocks: NoteBlock[]) => {
+    if (!activeTopicId) return;
+
+    try {
+      if (user && db) {
+        const topicRef = doc(db, "topics", activeTopicId);
+        const topicSnap = await getDoc(topicRef);
+        
+        if (topicSnap.exists()) {
+          const topicData = topicSnap.data() as Topic;
+          const updatedLessons = topicData.lessons.map(lesson => 
+            lesson.id === materialId ? { ...lesson, user_blocks: blocks } : lesson
+          );
+          await updateDoc(topicRef, { lessons: updatedLessons });
+        }
+      } else {
+        // Local storage fallback
+        const updatedTopics = topics.map(topic => ({
+          ...topic,
+          lessons: topic.lessons.map(lesson => 
+            lesson.id === materialId ? { ...lesson, user_blocks: blocks } : lesson
+          )
+        }));
+        setTopics(updatedTopics);
+        localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+      }
+      
+      if (material && material.id === materialId) {
+        setMaterial({ ...material, user_blocks: blocks });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `topics/${activeTopicId}`);
+      setError(t.syncError);
+    }
+  };
+
+  const createTopic = async () => {
     if (!newTopicName.trim()) return;
+    setIsLoading(true);
+    const topicId = crypto.randomUUID();
     const newTopic: Topic = {
-      id: crypto.randomUUID(),
+      id: topicId,
       name: newTopicName.trim(),
       lessons: []
     };
-    const updatedTopics = [newTopic, ...topics];
-    setTopics(updatedTopics);
-    setActiveTopicId(newTopic.id);
-    setNewTopicName("");
-    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+    
+    try {
+      if (user && db) {
+        await setDoc(doc(db, "topics", topicId), {
+          ...newTopic,
+          userId: user.uid,
+          createdAt: Timestamp.now()
+        });
+      } else {
+        const updatedTopics = [newTopic, ...topics];
+        setTopics(updatedTopics);
+        localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+      }
+      
+      setActiveTopicId(topicId);
+      setNewTopicName("");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `topics/${topicId}`);
+      setError(t.syncError + ": " + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const deleteTopic = (id: string, e: React.MouseEvent) => {
+  const deleteTopic = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    const updatedTopics = topics.filter(t => t.id !== id);
-    setTopics(updatedTopics);
-    if (activeTopicId === id) {
-      setActiveTopicId(updatedTopics.length > 0 ? updatedTopics[0].id : null);
+    try {
+      if (user && db) {
+        await deleteDoc(doc(db, "topics", id));
+      } else {
+        const updatedTopics = topics.filter(t => t.id !== id);
+        setTopics(updatedTopics);
+        localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+      }
+      
+      if (activeTopicId === id) {
+        setActiveTopicId(null);
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `topics/${id}`);
+      setError(t.syncError);
     }
-    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
   };
 
   const splitFile = () => {
@@ -1346,6 +1621,24 @@ export default function App() {
             <h1 className="text-xl font-bold tracking-tight text-slate-900">{t.appName}</h1>
           </div>
           <div className="flex items-center gap-4">
+            {user ? (
+              <div className="flex items-center gap-3">
+                <div className="hidden sm:flex flex-col items-end">
+                  <span className="text-xs font-bold text-slate-700">{user.displayName}</span>
+                  <button onClick={handleSignOut} className="text-[10px] text-slate-400 hover:text-rose-500 font-bold transition-colors">
+                    {t.btnSignOut}
+                  </button>
+                </div>
+                <img src={user.photoURL || ""} alt={user.displayName || ""} className="w-8 h-8 rounded-full border-2 border-indigo-100" referrerPolicy="no-referrer" />
+              </div>
+            ) : (
+              <button 
+                onClick={handleSignIn}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all shadow-sm flex items-center gap-2"
+              >
+                <Sparkles className="w-4 h-4" /> {t.btnSignIn}
+              </button>
+            )}
             <button 
               onClick={() => setShowHistory(!showHistory)}
               className="flex items-center gap-2 text-sm font-bold text-slate-600 hover:text-indigo-600 transition-colors"
@@ -1372,6 +1665,29 @@ export default function App() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-12">
+        {/* Error Alert */}
+        <AnimatePresence>
+          {error && (
+            <motion.div
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="mb-6 p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-center justify-between gap-3"
+            >
+              <div className="flex items-center gap-3 text-rose-600">
+                <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                <p className="text-sm font-medium">{error}</p>
+              </div>
+              <button 
+                onClick={() => setError(null)}
+                className="text-rose-400 hover:text-rose-600 transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* History Panel */}
         <AnimatePresence>
           {showHistory && (
@@ -1468,9 +1784,14 @@ export default function App() {
               </div>
               <button 
                 onClick={createTopic}
-                className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-100 flex items-center justify-center gap-2 whitespace-nowrap"
+                disabled={isLoading || !newTopicName.trim()}
+                className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-all shadow-md shadow-indigo-100 flex items-center justify-center gap-2 whitespace-nowrap min-w-[160px]"
               >
-                <Sparkles className="w-4 h-4" />
+                {isLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Sparkles className="w-4 h-4" />
+                )}
                 {t.btnCreateTopic}
               </button>
             </div>
