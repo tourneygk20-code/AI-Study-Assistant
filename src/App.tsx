@@ -117,7 +117,13 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     operationType,
     path
   }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  console.error('Firestore Error Details:', {
+    ...errInfo,
+    config: {
+      projectId: db.app.options.projectId,
+      authDomain: db.app.options.authDomain
+    }
+  });
   return new Error(JSON.stringify(errInfo));
 }
 
@@ -1196,100 +1202,37 @@ export default function App() {
 
   const t = translations[lang];
 
-  // Load history from localStorage (Fallback)
+  // Sync Topics from LocalStorage
   useEffect(() => {
-    if (!user && isAuthReady) {
-      const savedTopics = localStorage.getItem("learning_topics");
-      if (savedTopics && savedTopics !== "undefined") {
-        try {
-          const parsed = JSON.parse(savedTopics);
-          if (Array.isArray(parsed)) {
-            setTopics(parsed);
-            if (parsed.length > 0) {
-              setActiveTopicId(parsed[0].id);
-            }
+    const savedTopics = localStorage.getItem("learning_topics");
+    if (savedTopics) {
+      try {
+        const parsed = JSON.parse(savedTopics);
+        if (Array.isArray(parsed)) {
+          setTopics(parsed);
+          if (parsed.length > 0 && !activeTopicId) {
+            setActiveTopicId(parsed[0].id);
           }
-        } catch (e) {
-          console.error("Failed to parse history", e);
         }
+      } catch (e) {
+        console.error("Failed to parse history", e);
       }
     }
-  }, [user, isAuthReady]);
+    setIsAuthReady(true);
+  }, []);
 
-  // Auth Listener
+  // Auth Listener (Simplified)
   useEffect(() => {
     if (!auth) {
       setIsAuthReady(true);
       return;
     }
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       setIsAuthReady(true);
-      if (currentUser) {
-        try {
-          // Sync user profile to Firestore
-          await setDoc(doc(db, "users", currentUser.uid), {
-            uid: currentUser.uid,
-            email: currentUser.email,
-            displayName: currentUser.displayName,
-            photoURL: currentUser.photoURL,
-            createdAt: Timestamp.now()
-          }, { merge: true });
-        } catch (error) {
-          console.error("User sync error:", error);
-          handleFirestoreError(error, OperationType.WRITE, `users/${currentUser.uid}`);
-          setError(t.syncError + " (User Profile)");
-        }
-      }
     });
     return () => unsubscribe();
   }, []);
-
-  // Sync Topics from Firestore
-  useEffect(() => {
-    if (!user || !db || !auth.currentUser) {
-      setTopics([]);
-      setActiveTopicId(null);
-      return;
-    }
-
-    let unsubscribe: (() => void) | null = null;
-    
-    // Use a delay to ensure Auth state is fully propagated to Firestore
-    const timeoutId = setTimeout(() => {
-      if (!auth.currentUser) return;
-      
-      try {
-        const q = query(collection(db, "topics"), where("userId", "==", user.uid));
-        unsubscribe = onSnapshot(q, (snapshot) => {
-          const syncedTopics: Topic[] = [];
-          snapshot.forEach((doc) => {
-            syncedTopics.push(doc.data() as Topic);
-          });
-          setTopics(syncedTopics);
-          if (syncedTopics.length > 0 && !activeTopicId) {
-            setActiveTopicId(syncedTopics[0].id);
-          }
-        }, (error) => {
-          // Only show error if we are still authenticated
-          if (auth.currentUser) {
-            console.error("Topics sync error:", error);
-            handleFirestoreError(error, OperationType.LIST, "topics");
-            setError(t.syncError + " (Topics): " + (error instanceof Error ? error.message : String(error)));
-          }
-        });
-      } catch (err) {
-        console.error("Error setting up onSnapshot:", err);
-      }
-    }, 1000); // Increased delay to 1000ms for better stability
-
-    return () => {
-      clearTimeout(timeoutId);
-      if (unsubscribe) {
-        unsubscribe();
-      }
-    };
-  }, [user, isAuthReady]);
 
   const handleSignIn = async () => {
     try {
@@ -1310,76 +1253,38 @@ export default function App() {
     }
   };
 
-  // Save history to Firestore
+  // Save history to LocalStorage
   const saveToHistory = async (newMaterial: LearningMaterial) => {
     if (!activeTopicId) return;
 
-    try {
-      if (user && db) {
-        const topicRef = doc(db, "topics", activeTopicId);
-        const topicSnap = await getDoc(topicRef);
-        
-        if (topicSnap.exists()) {
-          const topicData = topicSnap.data() as Topic;
-          const filteredLessons = topicData.lessons.filter(l => l.title !== newMaterial.title);
-          await updateDoc(topicRef, {
-            lessons: [newMaterial, ...filteredLessons].slice(0, 50)
-          });
-        }
-      } else {
-        // Local storage fallback
-        const updatedTopics = topics.map(topic => {
-          if (topic.id === activeTopicId) {
-            const filteredLessons = topic.lessons.filter(l => l.title !== newMaterial.title);
-            return {
-              ...topic,
-              lessons: [newMaterial, ...filteredLessons].slice(0, 20)
-            };
-          }
-          return topic;
-        });
-        setTopics(updatedTopics);
-        localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+    const updatedTopics = topics.map(topic => {
+      if (topic.id === activeTopicId) {
+        const filteredLessons = topic.lessons.filter(l => l.title !== newMaterial.title);
+        return {
+          ...topic,
+          lessons: [newMaterial, ...filteredLessons].slice(0, 50)
+        };
       }
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `topics/${activeTopicId}`);
-      setError(t.syncError);
-    }
+      return topic;
+    });
+    setTopics(updatedTopics);
+    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
   };
 
   const updateMaterialBlocks = async (materialId: string, blocks: NoteBlock[]) => {
     if (!activeTopicId) return;
 
-    try {
-      if (user && db) {
-        const topicRef = doc(db, "topics", activeTopicId);
-        const topicSnap = await getDoc(topicRef);
-        
-        if (topicSnap.exists()) {
-          const topicData = topicSnap.data() as Topic;
-          const updatedLessons = topicData.lessons.map(lesson => 
-            lesson.id === materialId ? { ...lesson, user_blocks: blocks } : lesson
-          );
-          await updateDoc(topicRef, { lessons: updatedLessons });
-        }
-      } else {
-        // Local storage fallback
-        const updatedTopics = topics.map(topic => ({
-          ...topic,
-          lessons: topic.lessons.map(lesson => 
-            lesson.id === materialId ? { ...lesson, user_blocks: blocks } : lesson
-          )
-        }));
-        setTopics(updatedTopics);
-        localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
-      }
-      
-      if (material && material.id === materialId) {
-        setMaterial({ ...material, user_blocks: blocks });
-      }
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `topics/${activeTopicId}`);
-      setError(t.syncError);
+    const updatedTopics = topics.map(topic => ({
+      ...topic,
+      lessons: topic.lessons.map(lesson => 
+        lesson.id === materialId ? { ...lesson, user_blocks: blocks } : lesson
+      )
+    }));
+    setTopics(updatedTopics);
+    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+    
+    if (material && material.id === materialId) {
+      setMaterial({ ...material, user_blocks: blocks });
     }
   };
 
@@ -1393,46 +1298,23 @@ export default function App() {
       lessons: []
     };
     
-    try {
-      if (user && db) {
-        await setDoc(doc(db, "topics", topicId), {
-          ...newTopic,
-          userId: user.uid,
-          createdAt: Timestamp.now()
-        });
-      } else {
-        const updatedTopics = [newTopic, ...topics];
-        setTopics(updatedTopics);
-        localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
-      }
-      
-      setActiveTopicId(topicId);
-      setNewTopicName("");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `topics/${topicId}`);
-      setError(t.syncError + ": " + (error instanceof Error ? error.message : String(error)));
-    } finally {
-      setIsLoading(false);
-    }
+    const updatedTopics = [newTopic, ...topics];
+    setTopics(updatedTopics);
+    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+    
+    setActiveTopicId(topicId);
+    setNewTopicName("");
+    setIsLoading(false);
   };
 
   const deleteTopic = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    try {
-      if (user && db) {
-        await deleteDoc(doc(db, "topics", id));
-      } else {
-        const updatedTopics = topics.filter(t => t.id !== id);
-        setTopics(updatedTopics);
-        localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
-      }
-      
-      if (activeTopicId === id) {
-        setActiveTopicId(null);
-      }
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `topics/${id}`);
-      setError(t.syncError);
+    const updatedTopics = topics.filter(t => t.id !== id);
+    setTopics(updatedTopics);
+    localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+    
+    if (activeTopicId === id) {
+      setActiveTopicId(null);
     }
   };
 

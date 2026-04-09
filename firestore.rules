@@ -1,29 +1,11 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    function isAuthenticated() {
-      return request.auth != null;
-    }
-
-    function isSystemAdmin() {
-      return isAuthenticated() && request.auth.token.email == "tourneygk20@gmail.com";
-    }
-
-    match /users/{userId} {
-      allow read, write: if isAuthenticated() && (request.auth.uid == userId || isSystemAdmin());
-    }
-
     match /topics/{topicId} {
-      allow read, write: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid || isSystemAdmin());
+      allow read, write: if true;
     }
-
-    match /test/connection {
-      allow read: if true;
-    }
-    
     match /{document=**} {
-      allow read, write: if isSystemAdmin();
+      allow read, write: if request.auth != null;
     }
   }
 }
