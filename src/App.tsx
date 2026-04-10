@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect } from "react";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { 
   BookOpen, 
   Brain, 
@@ -27,6 +27,7 @@ import {
   Trophy,
   AlertCircle,
   Upload,
+  CloudUpload,
   Languages,
   FileUp,
   Video,
@@ -61,7 +62,8 @@ import {
   where, 
   orderBy, 
   Timestamp,
-  User
+  User,
+  writeBatch
 } from "./firebase";
 import { motion, AnimatePresence, Reorder } from "motion/react";
 import ReactMarkdown from "react-markdown";
@@ -210,9 +212,11 @@ const translations = {
     tableRemoveCol: "Remove Column",
     btnSignIn: "Sign in with Google",
     btnSignOut: "Sign Out",
+    btnSyncCloud: "Push Local to Cloud",
     syncing: "Syncing with Cloud...",
+    syncSuccess: "All data synced to cloud!",
     syncError: "Failed to sync data. Please check your connection.",
-    loginRequired: "Please sign in to save your progress.",
+    loginRequired: "Please sign in to push data to cloud.",
     firebaseConfigError: "Firebase is not configured correctly. Google Login will not work.",
     firebaseConfigHint: "Please set up Firebase in the AI Studio menu or provide API keys in the Secrets panel."
   },
@@ -290,9 +294,11 @@ const translations = {
     tableRemoveCol: "Xóa cột",
     btnSignIn: "Đăng nhập với Google",
     btnSignOut: "Đăng xuất",
+    btnSyncCloud: "Đẩy dữ liệu lên Cloud",
     syncing: "Đang đồng bộ...",
+    syncSuccess: "Đã đẩy toàn bộ dữ liệu lên Cloud!",
     syncError: "Đồng bộ thất bại. Vui lòng kiểm tra kết nối.",
-    loginRequired: "Vui lòng đăng nhập để lưu tiến trình.",
+    loginRequired: "Vui lòng đăng nhập để đẩy dữ liệu lên Cloud.",
     firebaseConfigError: "Cấu hình Firebase chưa đúng. Đăng nhập Google sẽ không hoạt động.",
     firebaseConfigHint: "Vui lòng thiết lập Firebase trong menu AI Studio hoặc cung cấp API key trong bảng Secrets."
   }
@@ -1202,7 +1208,7 @@ export default function App() {
 
   const t = translations[lang];
 
-  // Sync Topics from LocalStorage
+  // Sync Topics from LocalStorage (Primary Source of Truth)
   useEffect(() => {
     const savedTopics = localStorage.getItem("learning_topics");
     if (savedTopics) {
@@ -1221,18 +1227,41 @@ export default function App() {
     setIsAuthReady(true);
   }, []);
 
-  // Auth Listener (Simplified)
+  // Background Firestore Sync (Optional Backup)
   useEffect(() => {
-    if (!auth) {
-      setIsAuthReady(true);
-      return;
-    }
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setIsAuthReady(true);
-    });
-    return () => unsubscribe();
-  }, []);
+    if (!user || !db) return;
+
+    let unsubscribe: (() => void) | null = null;
+    
+    const setupSync = async () => {
+      try {
+        const q = query(collection(db, "topics"), where("userId", "==", user.uid));
+        unsubscribe = onSnapshot(q, (snapshot) => {
+          // If we have local data and this is from cache, don't overwrite
+          if (snapshot.metadata.fromCache && topics.length > 0) return;
+          
+          const syncedTopics: Topic[] = [];
+          snapshot.forEach((doc) => {
+            syncedTopics.push(doc.data() as Topic);
+          });
+          
+          if (syncedTopics.length > 0) {
+            // Merge logic: prefer local if cloud is empty, otherwise sync
+            setTopics(syncedTopics);
+            localStorage.setItem("learning_topics", JSON.stringify(syncedTopics));
+          }
+        }, (error) => {
+          // Silent fail for background sync to avoid bothering user with quota errors
+          console.warn("Cloud sync paused (Quota/Config):", error.message);
+        });
+      } catch (err) {
+        console.warn("Cloud sync initialization failed:", err);
+      }
+    };
+
+    setupSync();
+    return () => unsubscribe?.();
+  }, [user, db]);
 
   const handleSignIn = async () => {
     try {
@@ -1253,7 +1282,36 @@ export default function App() {
     }
   };
 
-  // Save history to LocalStorage
+  const syncLocalToCloud = async () => {
+    if (!user || !db) {
+      setError(t.loginRequired);
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const batch = writeBatch(db);
+      
+      for (const topic of topics) {
+        const topicRef = doc(db, "topics", topic.id);
+        batch.set(topicRef, {
+          ...topic,
+          userId: user.uid,
+          updatedAt: Timestamp.now()
+        }, { merge: true });
+      }
+
+      await batch.commit();
+      alert(t.syncSuccess);
+    } catch (error) {
+      console.error("Sync failed:", error);
+      setError(t.syncError);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Save history (LocalStorage + Optional Firestore)
   const saveToHistory = async (newMaterial: LearningMaterial) => {
     if (!activeTopicId) return;
 
@@ -1267,8 +1325,22 @@ export default function App() {
       }
       return topic;
     });
+    
     setTopics(updatedTopics);
     localStorage.setItem("learning_topics", JSON.stringify(updatedTopics));
+
+    // Optional Firestore write
+    if (user && db) {
+      try {
+        await setDoc(doc(db, "topics", activeTopicId), {
+          ...updatedTopics.find(t => t.id === activeTopicId),
+          userId: user.uid,
+          updatedAt: Timestamp.now()
+        }, { merge: true });
+      } catch (e) {
+        console.warn("Cloud save failed, data remains safe locally.");
+      }
+    }
   };
 
   const updateMaterialBlocks = async (materialId: string, blocks: NoteBlock[]) => {
@@ -1391,8 +1463,13 @@ export default function App() {
 
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const model = "gemini-3-flash-preview";
+      const model = "gemini-3.1-pro-preview";
       
+      if (!activeTopicId) {
+        setError(t.noTopicSelected);
+        return;
+      }
+
       const parts: any[] = [];
 
       if (mediaData) {
@@ -1408,76 +1485,32 @@ export default function App() {
 
       parts.push({ 
         text: `Analyze the provided content for the lesson titled "${lessonTitle}" and transform it into structured learning material. 
-        The output MUST be in ${lang === "en" ? "English" : "Vietnamese"}.
+        The output MUST be a valid JSON object matching the requested schema.
+        The language of the output MUST be ${lang === "en" ? "English" : "Vietnamese"}.
         
         IMPORTANT: 
-        - Generate AT LEAST 10 flashcards (thẻ ghi nhớ).
-        - Generate AT LEAST 10 quiz questions (câu hỏi trắc nghiệm).` 
+        - Generate AT LEAST 10 flashcards.
+        - Generate AT LEAST 10 quiz questions.` 
       });
 
       const response = await ai.models.generateContent({
         model,
-        contents: [{ role: "user", parts }],
+        contents: { parts },
         config: {
-          systemInstruction: `You are an expert AI Learning Assistant. Your goal is to transform raw text, transcripts, audio files, or video files into highly effective, structured learning materials that facilitate long-term memory and understanding. Ignore noise and repetitions. Be clear, concise, and insightful. Respond in ${lang === "en" ? "English" : "Vietnamese"}. ALWAYS generate at least 10 flashcards and 10 quiz questions for any content provided.`,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: "object",
-            properties: {
-              title: { type: "string" },
-              summary: { type: "string" },
-              sections: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    title: { type: "string" },
-                    key_points: { type: "array", items: { type: "string" } }
-                  },
-                  required: ["title", "key_points"]
-                }
-              },
-              concepts: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    name: { type: "string" },
-                    explanation: { type: "string" },
-                    example: { type: "string" },
-                    importance: { type: "string", enum: ["low", "medium", "high"] }
-                  },
-                  required: ["name", "explanation", "importance"]
-                }
-              },
-              learning_notes: { type: "string", description: "Markdown formatted notes" },
-              flashcards: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    question: { type: "string" },
-                    answer: { type: "string" }
-                  },
-                  required: ["question", "answer"]
-                }
-              },
-              quiz: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    question: { type: "string" },
-                    options: { type: "array", items: { type: "string" } },
-                    correct: { type: "string" }
-                  },
-                  required: ["question", "options", "correct"]
-                }
-              },
-              review_strategy: { type: "string" }
-            },
-            required: ["title", "summary", "sections", "concepts", "learning_notes", "flashcards", "quiz", "review_strategy"]
-          } as any
+          systemInstruction: `You are an expert AI Learning Assistant. Your goal is to transform raw text, transcripts, audio files, or video files into highly effective, structured learning materials that facilitate long-term memory and understanding. Ignore noise and repetitions. Be clear, concise, and insightful. Respond in ${lang === "en" ? "English" : "Vietnamese"}. ALWAYS generate at least 10 flashcards and 10 quiz questions for any content provided.
+          
+          The output MUST be a JSON object with the following structure:
+          {
+            "title": "string",
+            "summary": "string",
+            "sections": [{"title": "string", "key_points": ["string"]}],
+            "concepts": [{"name": "string", "explanation": "string", "example": "string", "importance": "low|medium|high"}],
+            "learning_notes": "string (markdown)",
+            "flashcards": [{"question": "string", "answer": "string"}],
+            "quiz": [{"question": "string", "options": ["string"], "correct": "string"}],
+            "review_strategy": "string"
+          }`,
+          responseMimeType: "application/json"
         }
       });
  
@@ -1506,8 +1539,16 @@ export default function App() {
         resultsRef.current?.scrollIntoView({ behavior: "smooth" });
       }, 100);
     } catch (err) {
-      console.error(err);
-      setError(t.errorFailed);
+      console.error("Generation error:", err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      
+      if (errorMessage.includes("SAFETY")) {
+        setError(lang === "en" ? "Content was flagged by safety filters. Please try different content." : "Nội dung bị bộ lọc an toàn từ chối. Vui lòng thử nội dung khác.");
+      } else if (errorMessage.includes("quota")) {
+        setError(lang === "en" ? "API quota exceeded. Please try again later." : "Hết hạn mức API. Vui lòng thử lại sau.");
+      } else {
+        setError(`${t.errorFailed} (${errorMessage})`);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -1529,9 +1570,19 @@ export default function App() {
               <div className="flex items-center gap-3">
                 <div className="hidden sm:flex flex-col items-end">
                   <span className="text-xs font-bold text-slate-700">{user.displayName}</span>
-                  <button onClick={handleSignOut} className="text-[10px] text-slate-400 hover:text-rose-500 font-bold transition-colors">
-                    {t.btnSignOut}
-                  </button>
+                  <div className="flex flex-col items-end">
+                    <button onClick={handleSignOut} className="text-[10px] text-slate-400 hover:text-rose-500 font-bold transition-colors">
+                      {t.btnSignOut}
+                    </button>
+                    <button 
+                      onClick={syncLocalToCloud}
+                      disabled={isLoading}
+                      className="flex items-center gap-1 mt-1 px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded text-[9px] font-bold hover:bg-indigo-100 transition-colors disabled:opacity-50"
+                    >
+                      <CloudUpload className="w-2.5 h-2.5" />
+                      {isLoading ? t.syncing : t.btnSyncCloud}
+                    </button>
+                  </div>
                 </div>
                 <img src={user.photoURL || ""} alt={user.displayName || ""} className="w-8 h-8 rounded-full border-2 border-indigo-100" referrerPolicy="no-referrer" />
               </div>
